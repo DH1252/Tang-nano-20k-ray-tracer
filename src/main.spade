@@ -193,7 +193,11 @@ entity top(
     let ch0 = inst video::tmds_encoder(clk_pix, rst_pix, blue, ctrl0, t_d.active);
     let ch1 = inst video::tmds_encoder(clk_pix, rst_pix, green, 0, t_d.active);
     let ch2 = inst video::tmds_encoder(clk_pix, rst_pix, red, 0, t_d.active);
-    let _ = inst dvi_phy(clk_pix, clk_ser, rst_pix, ch0, ch1, ch2, tmds_clk_p, tmds_clk_n, tmds_d_p, tmds_d_n);
+    // The serialisers' reset comes straight from the PLL lock, not from a
+    // clk_pix register: dvi_phy re-times it into clk_ser, and an unclocked
+    // source leaves no clk_pix -> clk_ser path for timing to check. The
+    // encoders send control symbols while the pixel domain is still in reset.
+    let _ = inst dvi_phy(clk_pix, clk_ser, !locked, ch0, ch1, ch2, tmds_clk_p, tmds_clk_n, tmds_d_p, tmds_d_n);
 
     // --------------------------------------------------------------- LEDs
     // Active low: heartbeat (frame counter), SDRAM ready, orbit, sun motion,

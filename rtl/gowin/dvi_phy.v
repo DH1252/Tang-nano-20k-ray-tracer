@@ -19,11 +19,12 @@ module dvi_phy (
     assign sym[3] = 10'b0000011111;  // TMDS clock: 5 high, 5 low per pixel
 
     // OSER10 RESET is checked against FCLK. Driven straight from the clk_pix
-    // domain it failed removal timing (the divided clock's edges land just
-    // after clk_ser's), so the lanes could leave reset on different serial
-    // clock edges. Re-time it into clk_ser with plain (synchronous) flip-flops:
-    // the clk_pix -> clk_ser hop is an ordinary path between related clocks,
-    // and every RESET pin is released by the same clk_ser register.
+    // domain it failed removal timing, so the lanes could leave reset on
+    // different serial clock edges. Re-time it into clk_ser so every RESET pin
+    // is released by the same clk_ser register. `rst` must come from an
+    // unclocked source (the top level uses the PLL lock): Gowin's timing model
+    // puts clk_pix edges 3.6 ns before clk_ser's, so a clk_pix register here
+    // fails hold.
     reg [1:0] rst_ser = 2'b11;
     always @(posedge clk_ser) rst_ser <= {rst_ser[0], rst};
 
