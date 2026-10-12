@@ -18,7 +18,11 @@ python3 scripts/gen_tables.py
 swim build
 # Gowin place and route cannot read back some of Spade's escaped identifiers.
 python3 scripts/plain_identifiers.py build/spade.sv build/spade_plain.v
-echo "generated build/spade_plain.v"
+# Stamp the source revision, so a Gowin project building stale Verilog shows.
+REV=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+git diff --quiet HEAD -- src 2>/dev/null || REV="$REV+local-changes"
+sed -i "1i // Generated from revision $REV on $(date -u +%Y-%m-%dT%H:%MZ) by scripts/build.sh" build/spade_plain.v
+echo "generated build/spade_plain.v (revision $REV)"
 [ "${1:-}" = prepare ] && exit 0
 
 GW_SH=${GW_SH:-${GOWIN_HOME:-/opt/gowin}/IDE/bin/gw_sh}

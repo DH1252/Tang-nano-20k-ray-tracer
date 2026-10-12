@@ -35,7 +35,9 @@ cargo install --git https://codeberg.org/spade-lang/swim
 
 **In the Gowin IDE:**
 1. Run `scripts/build.sh prepare`. It generates `build/spade_plain.v`, the
-   Verilog the project uses. Run it again after changing any `.spade` file.
+   Verilog the project uses. Run it again after every pull or `.spade` change:
+   the IDE builds whatever is in that file. Its first line names the revision
+   it was generated from.
 2. Open `gowin/tn20k_raytracer/tn20k_raytracer.gprj` and press *Run All*.
 
 **From the command line** (same project, headless `gw_sh`):
