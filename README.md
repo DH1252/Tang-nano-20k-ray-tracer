@@ -65,12 +65,12 @@ Notes on the Gowin flow:
     stores the place-and-route ones. Releases older than the 2.0E command set
     (for example V1.9.11.03) skip the newer synthesis options with a message.
   - The committed project was created with V1.9.11.03, so it stores only the
-    place-and-route settings. In the IDE, run
-    `source <repo>/gowin/timing_options.tcl` once in the Tcl console and save
-    the project, so your release stores the synthesis settings too. The script
-    prints `set` or `SKIPPED` for each option.
-    `saveto -all_options <file>` writes out every option the project actually
-    uses.
+    place-and-route settings. Run `GOWIN_HOME=/path/to/Gowin scripts/build.sh
+    options` once, with the project closed in the IDE, to store all the
+    settings your release supports. It prints `set` or `SKIPPED` for each one
+    and lists every option the project uses in `build/gowin_options.tcl`. (In
+    the IDE's Tcl console, not a shell, `source <repo>/gowin/timing_options.tcl`
+    does the same.)
 - **Headless Linux:** `scripts/build.sh` sets `QT_QPA_PLATFORM=offscreen`, so
   no display is needed. It also preloads the system libfreetype, because some
   Gowin releases bundle one that breaks on current distributions.
