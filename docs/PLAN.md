@@ -376,21 +376,23 @@ src/*.spade              RTL: top (main), video, uart, control, camera, sfu,
                          sdram, framebuffer, render, tables (generated), harness
 rtl/dq_capture.v         SDRAM read capture on the falling edge
 rtl/gowin/*.v            rPLL/CLKDIV clocks, OSER10 + TLVDS DVI PHY, ODDR SDRAM clock
-constraints/             tangnano20k.cst
+constraints/             tangnano20k.cst (pins), tangnano20k.sdc (timing)
+gowin/build.tcl          Gowin EDA project script
 model/hw.py              bit-exact Python model of the RTL arithmetic
 model/feasibility.py     float vs fixed-point study for the full tracer
 test/*.py                cocotb unit tests (swim test)
 sim/                     full-system Verilator testbench, SDRAM and DVI models
-scripts/build.sh         open-source bitstream build
+scripts/build.sh         Gowin EDA bitstream build (scripts/build_oss.sh: open-source)
 scripts/gen_tables.py    generates src/tables.spade (shared with the model)
 tools/rtctl.py           host-side UART control
 docs/                    this plan, UART protocol, images
 ```
 
-- **Build:** `swim build` (Spade to Verilog), then Yosys `synth_gowin`,
-  nextpnr-himbaechel and apicula's `gowin_pack` (`scripts/build.sh`). This
-  flow handles the GW2A DSPs, block RAM, PLLs, OSER10, TLVDS and the
-  embedded SDRAM pins. Gowin EDA remains an option for timing sign-off.
+- **Build:** `swim build` (Spade to Verilog), identifier rewrite
+  (`scripts/plain_identifiers.py`), then Gowin EDA's `gw_sh` for synthesis,
+  place and route, timing and bitstream (`scripts/build.sh`, `gowin/build.tcl`,
+  constraints in `constraints/`). The open-source flow (Yosys,
+  nextpnr-himbaechel, apicula) remains available as `scripts/build_oss.sh`.
 - **Simulation:** cocotb + Icarus through `swim test` for units, and Verilator
   for the full system (`sim/run.sh`).
 
@@ -436,4 +438,4 @@ docs/                    this plan, UART protocol, images
 | Embedded SDRAM bring-up (`O_sdram_*` / `IO_sdram_dq` ports) | M5 slips | Linear bursts only (whole scanlines in and out) keep the controller simple; follow the proven open-source Tang Nano 20K controllers |
 | The single-buffered MVP shows a tear line | Cosmetic | Accept it until M5, with an optional vsync-locked 30 fps mode |
 | Read-modify-write hazard in the Hit RAM on tiny compacted batches | Wrong nearest hit | Pad secondary batches to at least 8 slots (under 0.1 % of cycles) |
-| Gaps in the open-source flow for GW2A | Can't rely on the open-source toolchain | It already builds this design (DSP, BSRAM, PLL, OSER10, TLVDS, SDRAM pins); Gowin EDA stays available for sign-off |
+| Gowin EDA trips over generated Verilog | No bitstream | Already hit twice (escaped `\\_` names, constants over 2^16 bits); both handled. The open-source flow builds this design as a fallback |

@@ -22,24 +22,38 @@ the UART:
 
 <img src="docs/img/sim_frame_1.png" width="49%"> <img src="docs/img/sim_frame_4.png" width="49%">
 
-## Resource use (open-source flow, GW2AR-LV18QN88C8/I7)
+## Build and program
+
+The default flow is **Gowin EDA** (GowinSynthesis plus Gowin place and route)
+driven headless through `gw_sh`. You need:
+- [swim](https://codeberg.org/spade-lang/swim) (`cargo install --git https://codeberg.org/spade-lang/swim`)
+- Gowin EDA; the free Education edition (V1.9.11.03 for Linux) supports the GW2AR-18C.
+
+```
+GOWIN_HOME=/opt/gowin scripts/build.sh     # -> build/gowin/impl/pnr/tn20k_raytracer.fs
+openFPGALoader -b tangnano20k build/gowin/impl/pnr/tn20k_raytracer.fs   # load to SRAM
+```
+
+`scripts/build.sh` sets `QT_QPA_PLATFORM=offscreen`, so no display is needed.
+It also preloads the system libfreetype, because the one Gowin bundles breaks
+on current distributions. Two things in the Spade output have to be adapted
+for Gowin's tools:
+- **Escaped identifiers:** Spade uses names like `\_` for anonymous
+  registers, which Gowin's place and route cannot read back from the
+  synthesised netlist. `scripts/plain_identifiers.py` rewrites them;
+  `PLAIN=1 sim/run.sh` simulates that rewritten file.
+- **Large ROM constants:** constants over 2^16 bits are not accepted, so the
+  sine table is stored as a quarter wave.
+
+Pin and timing constraints: `constraints/tangnano20k.cst` and
+`constraints/tangnano20k.sdc`. The Gowin project script is `gowin/build.tcl`.
+
+`scripts/build_oss.sh` is the open-source alternative (Yosys, nextpnr-himbaechel,
+apicula). It produced the only full build so far:
 
 | LUT4 | Flip-flops | Block RAM | 18×18 multipliers | PLLs | fmax core / pixel (needed) |
 |------|-----------|-----------|-------------------|------|----------------------------|
 | 6,100 / 20,736 (29 %) | 3,725 / 15,552 | 10 / 46 | 29 / 48 (+7 9×9) | 2 / 2 | 146.6 / 85.8 MHz (54 / 25.2) |
-
-## Build and program
-
-You need [swim](https://codeberg.org/spade-lang/swim) (`cargo install --git
-https://codeberg.org/spade-lang/swim`), Yosys, nextpnr-himbaechel and apicula.
-The Python packages work: `pip install yowasp-yosys
-yowasp-nextpnr-himbaechel-gowin apycula`.
-
-```
-scripts/build.sh                                   # -> build/tn20k_raytracer.fs
-openFPGALoader -b tangnano20k build/tn20k_raytracer.fs      # load to SRAM
-openFPGALoader -b tangnano20k -f build/tn20k_raytracer.fs   # or write flash
-```
 
 ## Control it
 
@@ -78,6 +92,7 @@ LEDs, from `led[0]`:
 swim test        # cocotb unit tests: rsqrt unit, camera setup, UART + command parser
 sim/run.sh       # full system in Verilator: SDRAM and DVI models, scripted UART session,
                  # 3 frames compared bit for bit with model/hw.py (needs Verilator 5)
+PLAIN=1 sim/run.sh   # the same on the identifier-rewritten Verilog that Gowin EDA builds
 ```
 
 `model/hw.py` is a bit-exact Python model of the RTL arithmetic. The tests
@@ -89,7 +104,8 @@ SDRAM timing and TMDS symbols.
 ```
 src/            Spade RTL (main.spade is the top level)
 rtl/            Verilog: Gowin primitive wrappers, SDRAM read capture
-constraints/    pin constraints
+constraints/    pin (.cst) and timing (.sdc) constraints
+gowin/          Gowin EDA project script (gw_sh)
 test/           cocotb tests          sim/      system testbench and models
 model/          Python models         scripts/  build and table generation
 tools/          host tools            docs/     plan, UART protocol

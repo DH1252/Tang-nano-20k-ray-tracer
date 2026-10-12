@@ -2,7 +2,8 @@
 //   clk_ser  126.0 MHz  TMDS bit clock (OSER10 FCLK, DDR -> 252 Mbit/s)
 //   clk_pix   25.2 MHz  640x480@60 pixel clock (clk_ser / 5)
 //   clk_core  54.0 MHz  renderer, SDRAM, UART
-// PLL settings from apicula's gowin_pll for GW2AR-18 C8/I7.
+// PLL dividers from apicula's gowin_pll; the other parameters are the values
+// Gowin's IP generator emits for a fixed-frequency rPLL on the GW2AR-18C.
 module clocks (
     input  wire clk27,
     output wire clk_ser,
@@ -14,6 +15,12 @@ module clocks (
 
     rPLL #(
         .FCLKIN("27"),
+        .DEVICE("GW2AR-18C"),
+        .DYN_IDIV_SEL("false"), .DYN_FBDIV_SEL("false"), .DYN_ODIV_SEL("false"),
+        .PSDA_SEL("0000"), .DYN_DA_EN("true"), .DUTYDA_SEL("1000"),
+        .CLKOUT_FT_DIR(1'b1), .CLKOUTP_FT_DIR(1'b1), .CLKOUT_DLY_STEP(0), .CLKOUTP_DLY_STEP(0),
+        .CLKFB_SEL("internal"), .CLKOUT_BYPASS("false"), .CLKOUTP_BYPASS("false"),
+        .CLKOUTD_BYPASS("false"), .DYN_SDIV_SEL(2), .CLKOUTD_SRC("CLKOUT"), .CLKOUTD3_SRC("CLKOUT"),
         .IDIV_SEL(2),     // PFD 9 MHz
         .FBDIV_SEL(13),   // 126 MHz
         .ODIV_SEL(4)      // VCO 504 MHz
@@ -31,6 +38,12 @@ module clocks (
 
     rPLL #(
         .FCLKIN("27"),
+        .DEVICE("GW2AR-18C"),
+        .DYN_IDIV_SEL("false"), .DYN_FBDIV_SEL("false"), .DYN_ODIV_SEL("false"),
+        .PSDA_SEL("0000"), .DYN_DA_EN("true"), .DUTYDA_SEL("1000"),
+        .CLKOUT_FT_DIR(1'b1), .CLKOUTP_FT_DIR(1'b1), .CLKOUT_DLY_STEP(0), .CLKOUTP_DLY_STEP(0),
+        .CLKFB_SEL("internal"), .CLKOUT_BYPASS("false"), .CLKOUTP_BYPASS("false"),
+        .CLKOUTD_BYPASS("false"), .DYN_SDIV_SEL(2), .CLKOUTD_SRC("CLKOUT"), .CLKOUTD3_SRC("CLKOUT"),
         .IDIV_SEL(0),     // PFD 27 MHz
         .FBDIV_SEL(1),    // 54 MHz
         .ODIV_SEL(16)     // VCO 864 MHz
