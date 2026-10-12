@@ -53,8 +53,9 @@ Notes on the Gowin flow:
   regenerates the project.
 - **Timing-optimised settings:** `gowin/timing_options.tcl` holds the
   settings, taken from SUG1220-2.1E.
-  - Synthesis: `-opt_goal timing`, `-map_option 4`, `-netlist_hierarchy 0`
-    (flatten) and `-max_fanout 100`.
+  - Synthesis: `-opt_goal timing`, `-map_option 3` and `-netlist_hierarchy 0`
+    (flatten). `-map_option 4` and a lower `-max_fanout` buy more speed for
+    more LUTs; the design needs 54 MHz and has a large margin.
   - Place and route: timing-driven, `-place_option 2`, `-route_option 1`,
     resource replication, `-retiming_resource all`, clocks routed fastest
     first, hold fixing, and I/O registers in the IOBs.

@@ -143,6 +143,7 @@ def shade_pixel(d, eye, light, tp, x, y):
     half_e = (-rs_e) >> 1
     rsn = (rs_y1 << half_e) if half_e >= 0 else (rs_y1 >> -half_e)
     rsn &= (1 << 20) - 1
+    rsn = min(rsn, 131071)   # saturated to 18 bits in the RTL
     dy_n = sat18(wrap((dy * rsn) >> 16, 40))
     dl_n = sat18(wrap((dl * rsn) >> 16, 40))
     r16s = ((rc_y1 * rc_y1) >> 16) & ((1 << 17) - 1)

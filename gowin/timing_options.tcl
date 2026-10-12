@@ -15,10 +15,12 @@ proc tn20k_option {name value} {
 
 # --- GowinSynthesis -----------------------------------------------------------
 tn20k_option opt_goal timing          ;# timing-prioritised optimisation (default auto)
-tn20k_option map_option 4             ;# LUT5/LUT6 mapping, more LUTs for best timing
+tn20k_option map_option 3             ;# LUT5 mapping, some extra LUTs for timing
+                                      ;# (4 = LUT5/LUT6, costs the most LUTs)
 tn20k_option netlist_hierarchy 0      ;# flatten: Spade emits many tiny modules, let
                                       ;# synthesis optimise across their boundaries
-tn20k_option max_fanout 100           ;# split high-fanout nets (default 1000)
+# -max_fanout is left at its default: synthesis-level replication costs LUTs,
+# and place and route replicates the nets that matter (replicate_resources).
 
 # --- Place & Route ------------------------------------------------------------
 tn20k_option timing_driven 1          ;# timing-driven place and route

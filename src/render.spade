@@ -72,8 +72,13 @@ fn add_sat8(v: uint<8>, a: uint<8>) -> uint<8> {
     if s > 255 { 255 } else { trunc(s) }
 }
 
-fn umul(a: uint<16>, b: uint<16>) -> uint<32> { a * b }
-fn smul(a: int<20>, b: int<20>) -> int<40> { a * b }
+// Multipliers at their true operand widths. Gowin's synthesis does not narrow
+// sign- or zero-extended operands, so a multiply written on 40-bit values
+// costs nine DSP blocks or a pile of logic; these keep each one to a single
+// 18x18 (vector maths) or 9x9-class (colour) multiplier.
+fn smul18(a: int<18>, b: int<18>) -> int<36> { a * b }
+fn umul9(a: uint<9>, b: uint<9>) -> uint<18> { a * b }
+fn smul10(a: int<10>, b: int<10>) -> int<20> { a * b }
 
 fn pack565(r: uint<8>, g: uint<8>, b: uint<8>) -> uint<16> {
     let r5: uint<5> = trunc(r >> 3);
@@ -138,17 +143,16 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         // F: normalised D.y and D.L; floor distance before exponent shift.
         let half_e: int<8> = (0 -. rs.e) >>> 1;
         let rsn: uint<20> = shift_signed(zext(rs.y1), half_e);
-        let rsn40: int<40> = zext(rsn).as_int();
-        let dy_w: int<40> = sext(dy);
-        let dl_w: int<40> = sext(dl);
-        let dy_n = sat18(trunc((dy_w * rsn40) >>> 16));
-        let dl_n = sat18(trunc((dl_w * rsn40) >>> 16));
+        // ~1.0 in .16 for the ray lengths used here; saturate to fit 18 bits.
+        let rsn_lo: uint<18> = trunc(rsn);
+        let rsn18: int<18> = if rsn > 131071 { 131071 } else { rsn_lo.as_int() };
+        let dy_n = sat18(sext(smul18(dy, rsn18) >>> 16));
+        let dl_n = sat18(sext(smul18(dl, rsn18) >>> 16));
         let r16: uint<34> = rc.y1 * rc.y1;
         let r16s: uint<17> = trunc(r16 >> 16);
+        let r18: int<18> = zext(r16s).as_int();
         let ey = k.eye[1];
-        let ey40: int<40> = sext(ey);
-        let r40: int<40> = zext(r16s).as_int();
-        let w0: int<40> = trunc((ey40 * r40) >>> 16);
+        let w0: int<40> = sext(smul18(ey, r18) >>> 16);
         let wshift: int<8> = 0 -. rc.e;
     reg;
         // G: floor distance, hit test, mirrored ray . L
@@ -156,19 +160,15 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let w_big: int<40> = if wshift >= 0 && wshift < 20 { w0 << ws40.as_int() } else { 0x1ffff };
         let w: int<18> = if w_big > 0x1ffff { 0x1ffff } else if w_big < 0 { 0 } else { trunc(w_big) };
         let hit = dy < 0 && ey > 0 && w < 0x1e000;
-        let dyn40: int<40> = sext(dy_n);
-        let ly_w: int<40> = sext(k.light[1]);
         let dln40: int<40> = sext(dl_n);
-        let rl = sat18(dln40 -. trunc((dyn40 * ly_w) >>> 15));
+        let refl40: int<40> = sext(smul18(dy_n, k.light[1]) >>> 15);
+        let rl = sat18(dln40 -. refl40);
     reg;
         // H: floor point, table lookups
-        let w40: int<40> = sext(w);
-        let dxw: int<40> = sext(dx);
-        let dzw: int<40> = sext(dz);
         let ex24: int<24> = sext(k.eye[0]);
         let ez24: int<24> = sext(k.eye[2]);
-        let px: int<24> = ex24 +. trunc((w40 * dxw) >>> 16);
-        let pz: int<24> = ez24 +. trunc((w40 * dzw) >>> 16);
+        let px: int<24> = ex24 +. trunc(smul18(w, dx) >>> 16);
+        let pz: int<24> = ez24 +. trunc(smul18(w, dz) >>> 16);
         let k8 = clamp8(sext(dy_n >>> 8));
         let sun_idx = dot_index(dl_n);
         let spec_idx = dot_index(rl);
@@ -178,31 +178,34 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let ly_s: int<18> = k.light[1] >>> 8;
         let ly8: uint<9> = if ly_s < 0 { 0 } else if ly_s > 256 { 256 } else { trunc(ly_s.as_uint()) };
     reg;
-        // I: lighting, sky gradient (8-bit colour channels)
+        // I: lighting, sky gradient (8-bit colour channels; factors <= 256)
         let checker = px.as_bits()[12] ^^ pz.as_bits()[12];
         let wf: uint<10> = trunc(w.as_uint() >> 8);
-        let fade: uint<16> = if wf >= 256 { 0 } else { zext(256u10 -. wf) };
-        let ly16: uint<16> = zext(ly8);
-        let light: uint<16> = 96 +. trunc(umul(ly16, 160) >> 8);
-        let skyscale: uint<16> = 150 +. trunc(umul(ly16, 106) >> 8);
-        let albedo: uint<16> = if checker { 230 } else { 40 };
-        let spec_on: uint<16> = if ly8 > 0 { zext(spec8) } else { 0 };
-        let lit: uint<16> = trunc(umul(albedo, light) >> 8) +. spec_on;
-        let floor_lit: uint<16> = if lit > 255 { 255 } else { lit };
-        let k8i: int<20> = zext(k8).as_int();
-        let ss: int<20> = zext(skyscale).as_int();
+        let fade: uint<9> = if wf >= 256 { 0 } else { trunc(256u10 -. wf) };
+        let light: uint<9> = 96 +. trunc(umul9(ly8, 160) >> 8);
+        let skyscale: uint<9> = 150 +. trunc(umul9(ly8, 106) >> 8);
+        let albedo: uint<9> = if checker { 230 } else { 40 };
+        let spec_on: uint<9> = if ly8 > 0 { zext(spec8) } else { 0 };
+        let lit_d: uint<9> = trunc(umul9(albedo, light) >> 8);
+        let lit: uint<10> = lit_d + spec_on;
+        let floor_lit: uint<9> = if lit > 255 { 255 } else { trunc(lit) };
+        let k8i: int<10> = zext(k8).as_int();
+        let ss: int<10> = zext(skyscale).as_int();
         let sun_v: uint<8> = if disc { 255 } else { sun8 };
-        let sun_i: int<20> = zext(sun_v).as_int();
-        let sky_r = clamp8(trunc((smul(200 +. trunc(smul(-160, k8i) >>> 8), ss) >>> 8) +. (smul(sun_i, 255) >>> 8)));
-        let sky_g = clamp8(trunc((smul(215 +. trunc(smul(-125, k8i) >>> 8), ss) >>> 8) +. (smul(sun_i, 230) >>> 8)));
-        let sky_b = clamp8(trunc((smul(235 +. trunc(smul(-45, k8i) >>> 8), ss) >>> 8) +. (smul(sun_i, 180) >>> 8)));
+        let sun_i: int<10> = zext(sun_v).as_int();
+        let grad_r: int<10> = 200 +. trunc(smul10(-160, k8i) >>> 8);
+        let grad_g: int<10> = 215 +. trunc(smul10(-125, k8i) >>> 8);
+        let grad_b: int<10> = 235 +. trunc(smul10(-45, k8i) >>> 8);
+        let sky_r = clamp8((smul10(grad_r, ss) >>> 8) +. (smul10(sun_i, 255) >>> 8));
+        let sky_g = clamp8((smul10(grad_g, ss) >>> 8) +. (smul10(sun_i, 230) >>> 8));
+        let sky_b = clamp8((smul10(grad_b, ss) >>> 8) +. (smul10(sun_i, 180) >>> 8));
     reg;
         // J: fog the floor into the sky colour of the same ray, dither, pack
-        let inv_fade: uint<16> = 256 -. fade;
-        let fl: uint<32> = umul(floor_lit, fade);
-        let fog_r: uint<8> = trunc((fl +. umul(zext(sky_r), inv_fade)) >> 8);
-        let fog_g: uint<8> = trunc((fl +. umul(zext(sky_g), inv_fade)) >> 8);
-        let fog_b: uint<8> = trunc((fl +. umul(zext(sky_b), inv_fade)) >> 8);
+        let inv_fade: uint<9> = 256 -. fade;
+        let fl: uint<18> = umul9(floor_lit, fade);
+        let fog_r: uint<8> = trunc((fl +. umul9(zext(sky_r), inv_fade)) >> 8);
+        let fog_g: uint<8> = trunc((fl +. umul9(zext(sky_g), inv_fade)) >> 8);
+        let fog_b: uint<8> = trunc((fl +. umul9(zext(sky_b), inv_fade)) >> 8);
         let (r, g, b) = if hit { (fog_r, fog_g, fog_b) } else { (sky_r, sky_g, sky_b) };
         let dth = bayer4(p.x, p.y);
         let d_rb: uint<8> = zext(dth >> 1);
