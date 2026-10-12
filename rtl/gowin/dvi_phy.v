@@ -21,12 +21,18 @@ module dvi_phy (
     // OSER10 RESET is checked against FCLK. Driven straight from the clk_pix
     // domain it failed removal timing, so the lanes could leave reset on
     // different serial clock edges. Re-time it into clk_ser so every RESET pin
-    // is released by the same clk_ser register. `rst` must come from an
+    // is released on the same clk_ser edge. `rst` must come from an
     // unclocked source (the top level uses the PLL lock): Gowin's timing model
     // puts clk_pix edges 3.6 ns before clk_ser's, so a clk_pix register here
-    // fails hold.
-    reg [1:0] rst_ser = 2'b11;
-    always @(posedge clk_ser) rst_ser <= {rst_ser[0], rst};
+    // fails hold. The last stage is one register per lane, kept separate
+    // (syn_preserve) so each can sit next to its serialiser: one shared
+    // register was too far from the I/O blocks for the recovery check.
+    reg rst_ser0 = 1'b1;
+    reg [3:0] rst_lane /* synthesis syn_preserve = 1 */ = 4'b1111;
+    always @(posedge clk_ser) begin
+        rst_ser0 <= rst;
+        rst_lane <= {4{rst_ser0}};
+    end
 
     wire [3:0] ser;
     genvar i;
@@ -36,7 +42,7 @@ module dvi_phy (
                 .Q(ser[i]),
                 .D0(sym[i][0]), .D1(sym[i][1]), .D2(sym[i][2]), .D3(sym[i][3]), .D4(sym[i][4]),
                 .D5(sym[i][5]), .D6(sym[i][6]), .D7(sym[i][7]), .D8(sym[i][8]), .D9(sym[i][9]),
-                .PCLK(clk_pix), .FCLK(clk_ser), .RESET(rst_ser[1])
+                .PCLK(clk_pix), .FCLK(clk_ser), .RESET(rst_lane[i])
             );
         end
     endgenerate
