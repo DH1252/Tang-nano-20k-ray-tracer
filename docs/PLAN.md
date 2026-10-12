@@ -8,7 +8,8 @@ Milestones M0–M5 are built and verified in simulation, bit for bit against the
 Python model (`model/hw.py`). Nothing has run on a board yet.
 
 - **M0:** `model/hw.py` is the bit-exact model. Each pipeline has a reference
-  function (`ray_unit_ref`, `shade_unit_ref`, `animate`, `rsqrt_m`, `camera`),
+  function (`ray_unit_ref`, `shade_unit_ref`, `animate`, `rsqrt_m`, `camera`,
+  `project`),
   and the frame renderer is assembled from them.
 - **M1:** 640×480@60 DVI out of the HDMI connector, with clocks, scanout and
   UART control ([uart-protocol.md](uart-protocol.md), `tools/rtctl.py`).
@@ -22,12 +23,32 @@ Python model (`model/hw.py`). Nothing has run on a board yet.
     from the pow table, and a sky gradient with sun glow and disc.
   - Fog with distance, and reflections with kr in quarters, up to three
     bounces.
-  - About 40 fps at 320×240 for the default scene at 54 MHz (register 0x13
-    reports the frame time).
-- **M5:** a double-buffered RGB565 framebuffer in the embedded SDRAM, with no
-  tearing. A 640×480 quality mode (key `v`, button S2) stores each line's
-  halves in two banks; each frame's resolution travels with its buffer to
-  scanout.
+  - Register 0x13 reports the frame time.
+- **M5:** an RGB565 framebuffer in the embedded SDRAM, with no tearing, and
+  a 640×480 mode (key `v`, button S2). Each frame's resolution travels with
+  its buffer to scanout.
+- **640×480 at 40+ fps** (after M5), with no change of clock:
+  - *Checkerboard frames.* A 640×480 frame traces the 320 pixels of each
+    line at x = 2k + o, where o = y XOR phase and the phase flips every
+    frame. The framebuffer is triple-buffered: scanout shows the front
+    frame and fills the other checkerboard half from the previous frame,
+    which holds the other phase (from the neighbouring pixel after a change
+    of mode). A still scene is exact after two frames.
+  - *Screen-box culling.* Once per frame, `projector.spade` projects each
+    sphere to a conservative screen box, and its shadow to the union of the
+    boxes at the sphere and at its shadow's foot on the floor. A primary
+    ISECT sweep tests a sphere only on the lines and ray ranges its box
+    covers. A primary SHADOW sweep covers only the shadow-list entries whose
+    pixels lie in the sphere's shadow box. Boxes only ever over-cover, so
+    culling never changes a pixel.
+  - *Merged passes.* The last ISECT sweep (the floor) feeds the shading
+    unit's spawn step directly, and SHADE writes each finished pixel into the
+    line buffer, so the SPAWN and WRITE passes are gone (WRITE remains for
+    the test pattern).
+  - Measured in the system simulation at 54 MHz, default scene: 44.5 fps at
+    640×480 (sun at 12.7°), 48.7 fps with the sun at 22°, 53.7 fps at 34°,
+    and 31.7 fps with a reflective floor (kr ¼). 320×240 takes about half
+    as long, so the display's 60 Hz is the limit there.
 
 The RTL is in Spade rather than Verilog (§6). The sections below are the
 original plan. Where the build differs from it:
@@ -370,9 +391,9 @@ target asks for.
   plus a traversal stack. There is no DSP budget for it.
 - **Floating point.** One FP32 adder alone is about 500 LUTs, and fixed point
   is validated as sufficient.
-- **Real-time 640×480.** The single IU is DSP-bound. A second one needs about
-  13 multipliers, and only 5–7 are left. 640×480 is offered as the
-  quality mode instead.
+- **Real-time 640×480, every pixel every frame.** The single IU is
+  DSP-bound. A second one needs about 13 multipliers, and only 5–7 are left.
+  The 640×480 mode traces half the pixels per frame instead (see Status).
 - **Path tracing / global illumination.** Too noisy at these sample rates. Soft
   effects appear only in quality mode.
 - **Scenes or textures from the microSD card.** SD plus FAT logic buys little
@@ -437,7 +458,7 @@ docs/                    this plan, UART protocol, images
 | M2 | SFU + IU in simulation, then on hardware with primary rays and a flat colour per object (**done in simulation**) | Bit-exact in simulation; sphere silhouettes on screen |
 | M3 | Tier 0: MVP shading, animator, buttons (**done in simulation**)     | Animated scene at ≥ 25 fps at 54 MHz; ≤ 6.5 K LUTs |
 | M4 | Tier 1: reflections, specular, fog, extra bounces (**done in simulation**) | Bit-exact with the model; ≥ 25 fps. **Demo complete.** |
-| M5 | SDRAM framebuffer, double-buffered RGB565, 640×480 quality mode (**done in simulation**) | No tearing; 38 BSRAMs freed; 640×480 quality mode works |
+| M5 | SDRAM framebuffer, RGB565 with no tearing, 640×480 mode (**done in simulation**; triple-buffered checkerboard frames at 40+ fps) | No tearing; 38 BSRAMs freed; 640×480 mode works |
 | M6 | Tier 2: soft CPU with UART console, AA, textures, second light       | ≤ 75 % of LUTs; timing met |
 | M7 | Tier 3 stretch items, as the budget allows                           | Each item lands with its own utilisation entry |
 

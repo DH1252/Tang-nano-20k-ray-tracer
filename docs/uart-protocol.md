@@ -71,19 +71,21 @@ All registers are 16 bits wide. Angles are fractions of a turn: `0x4000` is
 | 0C   | sun_speed     | angle per frame, signed        | `0x0010` | added to sun_az every rendered frame while sun motion is on |
 | 0D   | sdram_rd_lat  | 1..7 cycles                    | `4`      | SDRAM read capture latency, for hardware bring-up |
 | 0E   | frames        | count                          |          | read only: frames rendered |
-| 0F   | status        | bit 0 SDRAM ready, bit 1 front buffer |   | read only |
+| 0F   | status        | bit 0 SDRAM ready, bit 1 shown frame is 640×480, bit 2 its two checkerboard halves are merged |   | read only |
 | 10   | anim          | animation time                 | `0x0000` | sphere angles are `anim × k + phase` (see `SPHERES` in `scripts/gen_tables.py`) |
 | 11   | anim_speed    | added per frame                | `0x0040` | added to anim every rendered frame while sphere motion is on |
 | 12   | scene         | bits 1:0 bounces, 3:2 floor reflectivity (quarters), 6:4 spheres | `0x0061` | 1 bounce, matt floor, 6 spheres; more than 6 counts as 6 |
-| 13   | cycles        | clock cycles per frame / 256   |          | read only: the last finished frame (54 MHz: 0x1240 ≈ 23 ms) |
+| 13   | cycles        | clock cycles per frame / 256   |          | read only: the last finished frame (54 MHz: 0x1284 ≈ 22 ms ≈ 44.5 fps for the default 640×480 view) |
 
 The camera orbits `target` at distance `dist`: yaw 0 looks along −z. The sun
 is a directional light. Auto-motion adds the speed registers once per
-rendered frame. The display always runs at 60 Hz; the tracer finishes a
-320×240 frame in roughly 20–35 ms depending on the view and the scene
-register (`R 13` shows it), and a 640×480 quality frame in about four times
-as long. A finished frame is shown at the next vertical blank, so the picture
-never tears.
+rendered frame. The display always runs at 60 Hz. In the 640×480 quality
+mode each frame traces one checkerboard half of the pixels, and the display
+fills the other half from the previous frame (or, after a change of mode,
+from the neighbouring pixel). The default view takes about 22 ms per frame
+(44.5 fps at 54 MHz); a higher sun is faster, a reflective floor slower
+(`R 13` shows it). A 320×240 frame takes about half as long. A finished frame
+is shown at the next vertical blank, so the picture never tears.
 
 ## Bring-up hints
 

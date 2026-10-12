@@ -105,7 +105,12 @@ def camera(p):
                 d0=[r[21], r[23], r[25]],
                 du=[r[16], 0, r[17]],
                 dv=[r[18], r[19], r[20]],
-                light=[n18(r[26]), n18(r[6]), n18(r[27])])
+                light=[n18(r[26]), n18(r[6]), n18(r[27])],
+                # camera basis (s1.16) and pixel step s (.24), for the projector
+                fwd=[n18(-r[8]), n18(-r[2]), n18(-r[9])],
+                right=[n18(r[1]), 0, n18(-r[0])],
+                up=[n18(-r[10]), n18(r[3]), n18(-r[11])],
+                s=r[15])
 
 
 
@@ -173,6 +178,115 @@ def animate(anim):
         z = s["cz"] + ((s["R"] * sin16(td)) >> 16)
         out.append([sat18(x), sat18(y), sat18(z)])
     return out
+
+
+# ----------------------------------------------------------- projector.spade
+def _div_floor(num, den, sh):
+    """floor(num * 2^sh / den) for den > 0, saturated to +-1023, as the serial
+    divider computes it: quotient of |num| and its remainder."""
+    mag = abs(num) << sh
+    q, rem = divmod(mag, den)
+    if num < 0:
+        q = q + (1 if rem else 0)
+        q = -min(q, 1023)
+    else:
+        q = min(q, 1023)
+    return q
+
+
+def project(eye, cam, centre, r, fov, quality, keep=False):
+    """Conservative screen box (x0, x1, y0, y1) of a sphere in pixel
+    coordinates, or None when it cannot be on screen; (0, W-1, 0, H-1) when
+    it cannot be bounded. Every primary ray that can hit the sphere lies in
+    the box (checked by check_projector)."""
+    W, H = (640, 480) if quality else (320, 240)
+    full = (0, W - 1, 0, H - 1)
+    lw = [centre[k] - eye[k] for k in range(3)]
+    if any(abs(v) > 131071 for v in lw):
+        return full
+    L = [sat18(v) for v in lw]
+    dot = lambda a: sat18((L[0] * a[0] + L[1] * a[1] + L[2] * a[2]) >> 16)
+    zc, xc, yc = dot(cam["fwd"]), dot(cam["right"]), dot(cam["up"])
+    rr = r + (r >> 4) + 16                         # radius + 6 % + 1/256 unit
+    fv = fov - (fov >> 2)                          # tan(vertical fov / 2) = 0.75 tan(h)
+    kx = 65536 + ((fov * fov) >> 15)               # >= sqrt(1 + tan^2), u2.16
+    ky = 65536 + ((fv * fv) >> 15)
+    rkx = (rr * kx) >> 16
+    rky = (rr * ky) >> 16
+    if zc <= 64:
+        return full
+    den = zc * (cam["s"] >> 4)                     # depth * pixel step, .32
+    if den <= 0:
+        return full
+    sh = 21 if quality else 20
+    x0 = W // 2 - 2 + _div_floor(xc - rkx, den, sh)
+    x1 = W // 2 + 1 - _div_floor(-(xc + rkx), den, sh)
+    y0 = H // 2 - 2 + _div_floor(-yc - rky, den, sh)
+    y1 = H // 2 + 1 - _div_floor(yc - rky, den, sh)
+    if (x0 > W - 1 or x1 < 0 or y0 > H - 1 or y1 < 0) and not keep:
+        return None
+    # keep: an off-screen box is clamped onto the screen edge, so a union
+    # still stretches towards it
+    cx = lambda v: clamp(v, 0, W - 1)
+    cy = lambda v: clamp(v, 0, H - 1)
+    return (cx(x0), cx(x1), cy(y0), cy(y1))
+
+
+def shadow_foot(centre, r, inv_ly, light):
+    """Far end of the region sphere (centre, r) can shadow: points within r of
+    the axis from the centre away from the light, above the floor, so the
+    axis is lam = (C.y + r) / L.y long. The region is the capsule between the
+    sphere and a sphere of the same radius at the returned centre; None if it
+    cannot be bounded."""
+    if inv_ly is None:
+        return None
+    rr = r + (r >> 4) + 16
+    lam = (sat18(centre[1] + rr) * inv_ly) >> 12   # .12
+    if lam > 131071:
+        return None
+    b = [centre[k] - ((lam * light[k]) >> 16) for k in range(3)]
+    if any(abs(v) > 131071 for v in b):
+        return None
+    return b
+
+
+def inv_light_y(light):
+    """1 / L.y in .12, or None when the sun is too low (or below the horizon)
+    to bound shadows."""
+    ly = light[1]
+    if ly <= 2048:                                 # below ~1.8 degrees
+        return None
+    return (1 << 28) // ly
+
+
+def boxes(p, scene, quality):
+    """(sphere boxes, shadow boxes) for a frame: None = never on screen,
+    full screen = cannot be bounded."""
+    cam = camera(p)
+    cen = animate(scene["anim"])
+    W, H = (640, 480) if quality else (320, 240)
+    full = (0, W - 1, 0, H - 1)
+    inv = inv_light_y(cam["light"])
+    sb, hb = [], []
+    for i in range(scene["nsph"]):
+        r = sphere_static(i)["r"]
+        sb.append(project(cam["eye"], cam, cen[i], r, p["fov"], quality))
+        foot = shadow_foot(cen[i], r, inv, cam["light"])
+        if foot is None:
+            hb.append(full)
+        else:
+            a = project(cam["eye"], cam, cen[i], r, p["fov"], quality, keep=True)
+            b = project(cam["eye"], cam, foot, r, p["fov"], quality, keep=True)
+            hb.append(box_union(a, b))
+    return sb, hb
+
+
+def box_union(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return (min(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), max(a[3], b[3]))
 
 
 # ------------------------------------------------------------ ray_unit.spade

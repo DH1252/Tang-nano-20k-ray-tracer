@@ -6,7 +6,7 @@
 //   1. the first frame: defaults plus one auto-motion step
 //   2. after W commands (camera, sun, animation time, reflective floor) and
 //      the keys `d` and `l`
-//   3. the same view in the 640x480 quality mode
+//   3. the same view in the 640x480 quality mode (two checkerboard frames merged)
 //   4. the quality-mode test pattern (key `t`)
 `timescale 1ps/1ps
 module tb;
@@ -112,7 +112,8 @@ module tb;
         send("R 13\r");               // cycles per frame / 256
         send("W 12 0061\r");          // floor back to matt
         send("W 01 0020\r");          // 640x480 quality mode
-        wait_frames(20);              // one quality frame (~95 ms) shown
+        wait_frames(20);              // two checkerboard frames (~22 ms each) merged
+        send("R 13\r");               // quality-mode cycles per frame / 256
         send("t");                    // test pattern
         wait_frames(24);
         $display("tb: sdram reads=%0d writes=%0d refreshes=%0d errors=%0d",

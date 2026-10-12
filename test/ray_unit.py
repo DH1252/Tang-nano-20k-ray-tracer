@@ -67,8 +67,8 @@ def in_str(q):
 
 def out_str(q):
     r = hw.ray_unit_ref(q["mode"], q["o"], q["d"], q["c"], q["r2"], q["floor"])
-    return ("Some(RuOut$(mode: {}, idx: {}, obj: {}, t: {}, hit: {}, dn: {}))"
-            .format(q["mode"], q["idx"], q["obj"], r["t"], b(r["hit"]), arr(r["dn"])))
+    return ("Some(RuOut$(mode: {}, idx: {}, obj: {}, t: {}, hit: {}, dn: {}, o: {}, d: {}))"
+            .format(q["mode"], q["idx"], q["obj"], r["t"], b(r["hit"]), arr(r["dn"]), arr(q["o"]), arr(q["d"])))
 
 
 @cocotb.test()

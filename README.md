@@ -12,11 +12,16 @@ against the Python model. Nothing has run on a board yet.
   ambient light, Phong highlights, reflections with up to three bounces, a
   sky gradient with sun glow, and distance fog.
 - Scanline-batched passes over one shared intersection unit and one shading
-  unit ([plan](docs/PLAN.md) §4.2): about 40 fps at 320×240 for the default
-  scene at a 54 MHz core clock.
-- A 640×480 quality mode (key `v` or button S2), at about a quarter of the
-  frame rate.
-- 640×480@60 DVI out of the HDMI connector, from a double-buffered RGB565
+  unit ([plan](docs/PLAN.md) §4.2). Per-frame screen boxes for every sphere
+  and its shadow let each line test only the spheres that can touch it.
+- 640×480 at about 45 fps for the default scene at a 54 MHz core clock (key
+  `v` or button S2): each frame traces one checkerboard half of the pixels,
+  and the display takes the other half from the previous frame. A higher sun
+  is faster (about 49 fps at 22°, 54 at 34°); a reflective floor is slower
+  (about 32 fps at kr ¼).
+- 320×240 (pixel-doubled) traces in about half the time, so the display's
+  60 Hz is the limit.
+- 640×480@60 DVI out of the HDMI connector, from a triple-buffered RGB565
   framebuffer in the chip's embedded SDRAM. Buffers swap during vertical
   blanking, so there is no tearing.
 - An orbit camera, a moving sun and moving spheres, controlled from the USB
@@ -25,7 +30,8 @@ against the Python model. Nothing has run on a board yet.
 Frames from the full-system simulation, captured at the HDMI encoder and
 identical to the Python model. Left: the first frame. Right: after UART
 commands that move the camera and sun, advance the animation and make the
-floor reflective. Below: the same view in the 640×480 quality mode.
+floor reflective. Below: the same view in the 640×480 mode, merged from two
+checkerboard frames.
 
 <img src="docs/img/sim_frame_1.png" width="49%"> <img src="docs/img/sim_frame_2.png" width="49%">
 <img src="docs/img/sim_frame_3.png" width="98%">
@@ -128,7 +134,7 @@ keys (lower case):
 - `o`: camera auto-orbit on/off
 - `p`: sun motion on/off
 - `m`: sphere motion on/off
-- `v`: 640×480 quality mode on/off
+- `v`: 640×480 mode on/off
 - `b`: reflection bounces (0–3)
 - `r`: floor reflectivity (0, ¼, ½, ¾)
 - `t`: test pattern
@@ -169,7 +175,11 @@ Notes for Windows:
   115200) or Tera Term (*Setup → Serial port*, 115200, 8N1, no flow control)
   both work for the single keys and the `W`/`R` line commands.
 
-Buttons: **S1** pauses or resumes all motion, **S2** switches the quality mode.
+Buttons: **S1** pauses or resumes all motion, **S2** switches the 640×480 mode.
+
+The checkerboard halves come from consecutive frames, so a fast-moving
+object shows a fine comb pattern along its edges while it moves. A still
+picture is exact: two frames of a still scene give the full 640×480 image.
 
 LEDs, from `led[0]`:
 - `led[0]` frame heartbeat
@@ -183,7 +193,7 @@ LEDs, from `led[0]`:
 
 ```
 swim test        # cocotb unit tests against model/hw.py: rsqrt unit, camera setup, animator,
-                 # ray unit, shading unit, UART + command parser
+                 # ray unit, shading unit, screen-box projector, UART + command parser
 sim/run.sh       # full system in Verilator: SDRAM and DVI models, scripted UART session,
                  # 4 frames (320x240 and 640x480) compared bit for bit with model/hw.py
                  # (needs Verilator 5, about 3 minutes)

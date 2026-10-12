@@ -23,8 +23,9 @@ def params_str(p):
 
 def out_str(c):
     arr = lambda v: "[" + ", ".join(str(x) for x in v) + "]"
-    return "CamOut$(eye: {}, d0: {}, du: {}, dv: {}, light: {})".format(
-        arr(c["eye"]), arr(c["d0"]), arr(c["du"]), arr(c["dv"]), arr(c["light"]))
+    return "CamOut$(eye: {}, d0: {}, du: {}, dv: {}, light: {}, fwd: {}, right: {}, up: {}, s: {})".format(
+        arr(c["eye"]), arr(c["d0"]), arr(c["du"]), arr(c["dv"]), arr(c["light"]),
+        arr(c["fwd"]), arr(c["right"]), arr(c["up"]), c["s"])
 
 
 @cocotb.test()

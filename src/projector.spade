@@ -1,0 +1,342 @@
+// Per-frame screen boxes for culling (model/hw.py project, boxes).
+//
+// For each sphere it finds a conservative pixel box containing every primary
+// ray that can hit the sphere, and a "shadow box" containing every pixel
+// whose visible point the sphere can shadow. The tracer skips a sphere's
+// sweep on lines outside its box and limits the sweep to the box's columns,
+// and does the same for shadow rays, so the boxes only ever save time: a
+// box that is too large costs cycles, never pixels.
+//
+// Projection: with camera coordinates (xc, yc, zc) of the centre, a column
+// of pixels lies in a plane through the eye, and the sphere can reach that
+// column only if the plane passes within r of the centre:
+//   |xc - u zc| < r sqrt(1 + u^2) <= r kx,   u = (x - cx) * pixel step
+// which bounds x between (xc -+ r kx) / (zc s); rows likewise. The shadow
+// region of a sphere is the capsule from the sphere along -L down to the
+// floor, so its box is the union of the boxes of the two end spheres.
+//
+// One 18x18 multiplier and a serial divider (in logic), roughly 1000 cycles
+// per frame.
+
+use lib::fx::sat18;
+use lib::fx::smul18;
+use lib::tables::sphere_static;
+
+pub struct Box {
+    on: bool,
+    x0: uint<10>,
+    x1: uint<10>,
+    y0: uint<9>,
+    y1: uint<9>,
+}
+
+pub struct ProjOut {
+    sph: [Box; 6],
+    shd: [Box; 6],
+    // Pulses for one cycle when the boxes are valid; they hold until the next start.
+    done: bool,
+}
+
+// floor(mag / den) to 17 bits, one quotient bit per cycle, with a flag for a
+// non-zero remainder. A quotient of 2^17 or more saturates.
+struct DivState {
+    rem: uint<41>,
+    den: uint<36>,
+    q: uint<17>,
+    b: uint<5>,
+}
+
+entity udiv(clk: clock, rst: bool, start: Option<(uint<41>, uint<36>)>) -> Option<(uint<17>, bool)> {
+    decl st;
+    let (nst, out): (Option<DivState>, Option<(uint<17>, bool)>) = match start {
+        Some((mag, den)) => {
+            let big: uint<53> = zext(den) << 17u53;
+            if zext(mag) >= big {
+                (None, Some((0x1ffff, true)))
+            } else {
+                (Some(DivState$(rem: mag, den: den, q: 0, b: 16)), None)
+            }
+        },
+        None => match st {
+            Some(s) => {
+                let d: uint<53> = zext(s.den) << zext(s.b);
+                let take = zext(s.rem) >= d;
+                let rem: uint<41> = if take { trunc(zext(s.rem) - d) } else { s.rem };
+                let bit: uint<17> = 1u17 << zext(s.b);
+                let q: uint<17> = if take { s.q | bit } else { s.q };
+                if s.b == 0 {
+                    (None, Some((q, rem != 0)))
+                } else {
+                    (Some(DivState$(rem: rem, den: s.den, q: q, b: trunc(s.b - 1))), None)
+                }
+            },
+            None => (None, None),
+        },
+    };
+    reg(clk) st: Option<DivState> reset(rst: None) = nst;
+    out
+}
+
+enum Ph {
+    Idle,
+    K0,
+    K1,
+    K2,
+    Inv,
+    InvWait,
+    // b: 0 = the sphere, 1 = its shadow foot
+    Lset{i: uint<3>, b: uint<1>},
+    Dot{i: uint<3>, b: uint<1>, k: uint<4>},
+    Post{i: uint<3>, b: uint<1>, k: uint<2>},
+    Div{i: uint<3>, b: uint<1>, n: uint<2>},
+    DivWait{i: uint<3>, b: uint<1>, n: uint<2>},
+    Store{i: uint<3>, b: uint<1>},
+    Foot{i: uint<3>, k: uint<3>},
+    Done,
+}
+
+fn sat19(v: int<19>) -> int<18> { if v > 131071 { 131071 } else if v < -131071 { -131071 } else { trunc(v) } }
+fn big19(v: int<19>) -> bool { v > 131071 || v < -131071 }
+fn sat20(v: int<20>) -> int<18> { if v > 131071 { 131071 } else if v < -131071 { -131071 } else { trunc(v) } }
+fn big20(v: int<20>) -> bool { v > 131071 || v < -131071 }
+fn abs20(v: int<20>) -> uint<20> { if v < 0 { (0 -. v).as_uint() } else { v.as_uint() } }
+
+fn full_box(quality: bool) -> Box {
+    Box$(on: true, x0: 0, x1: if quality { 639 } else { 319 }, y0: 0, y1: if quality { 479 } else { 239 })
+}
+
+fn union(a: Box, b: Box) -> Box {
+    Box$(
+        on: true,
+        x0: if a.x0 < b.x0 { a.x0 } else { b.x0 },
+        x1: if a.x1 > b.x1 { a.x1 } else { b.x1 },
+        y0: if a.y0 < b.y0 { a.y0 } else { b.y0 },
+        y1: if a.y1 > b.y1 { a.y1 } else { b.y1 },
+    )
+}
+
+fn clampx(v: int<12>, wm1: int<12>) -> uint<10> { if v < 0 { 0 } else if v > wm1 { trunc(wm1.as_uint()) } else { trunc(v.as_uint()) } }
+fn clampy(v: int<12>, hm1: int<12>) -> uint<9> { if v < 0 { 0 } else if v > hm1 { trunc(hm1.as_uint()) } else { trunc(v.as_uint()) } }
+
+fn setb(old: [Box; 6], i: uint<3>, en: bool, v: Box) -> [Box; 6] {
+    [
+        if en && i == 0 { v } else { old[0] },
+        if en && i == 1 { v } else { old[1] },
+        if en && i == 2 { v } else { old[2] },
+        if en && i == 3 { v } else { old[3] },
+        if en && i == 4 { v } else { old[4] },
+        if en && i == 5 { v } else { old[5] },
+    ]
+}
+
+pub entity projector(
+    clk: clock,
+    rst: bool,
+    start: bool,
+    quality: bool,
+    eye: [int<18>; 3],
+    fwd: [int<18>; 3],
+    right: [int<18>; 3],
+    up: [int<18>; 3],
+    s: int<28>,
+    fov: uint<16>,
+    light: [int<18>; 3],
+    centres: [[int<18>; 3]; 6],
+) -> ProjOut {
+    decl ph, prod, ptag, acc0, acc1, acc2, lv, ovf, zc, xc, yc, rkx, rky, den, full, qv, kx, ky, invly, invly_ok;
+    decl keep_a, foot, lam, foot_ok, sph, shd;
+
+    // ---------------------------------------------------------- operands
+    let ti: uint<3> = match ph {
+        Ph::Lset(i, _) => i, Ph::Dot(i, _, _) => i, Ph::Post(i, _, _) => i, Ph::Div(i, _, _) => i,
+        Ph::DivWait(i, _, _) => i, Ph::Store(i, _) => i, Ph::Foot(i, _) => i, _ => 0,
+    };
+    let tb: uint<1> = match ph {
+        Ph::Lset(_, b) => b, Ph::Dot(_, b, _) => b, Ph::Post(_, b, _) => b, Ph::Div(_, b, _) => b,
+        Ph::DivWait(_, b, _) => b, Ph::Store(_, b) => b, _ => 0,
+    };
+    let st = sphere_static(ti);
+    let rr: int<18> = st.r +. (st.r >>> 4) +. 16;
+    let c = centres[ti];
+    let target = if tb == 0 { c } else { foot };
+    let fov18: int<18> = zext(fov).as_int();
+    let fv18: int<18> = fov18 -. (fov18 >>> 2);
+    let sq: int<18> = trunc(s >>> 4);
+    let cy_rr = sat18(sext(c[1]) +. sext(rr));
+    // lambda straight from the product in the cycle it is computed (Foot 1)
+    let f1 = match ph { Ph::Foot(_, 1) => true, _ => false };
+    let lam_now: int<24> = if f1 { trunc(prod >>> 12) } else { lam };
+    let lam18: int<18> = trunc(lam_now);
+
+    let (ma, mb, tag): (int<18>, int<18>, Option<uint<2>>) = match ph {
+        Ph::K0 => (fov18, fov18, None),
+        Ph::K1 => (fv18, fv18, None),
+        Ph::Dot(_, _, k) => {
+            let g: uint<2> = if k < 3 { 0 } else if k < 6 { 1 } else { 2 };
+            let cmp: uint<2> = if k == 0 || k == 3 || k == 6 { 0 } else if k == 1 || k == 4 || k == 7 { 1 } else { 2 };
+            let basis = if g == 0 { fwd } else if g == 1 { right } else { up };
+            if k < 9 { (lv[cmp], basis[cmp], Some(g)) } else { (0, 0, None) }
+        },
+        Ph::Post(_, _, 0) => (rr, kx, None),
+        Ph::Post(_, _, 1) => (rr, ky, None),
+        Ph::Post(_, _, 2) => (zc, sq, None),
+        Ph::Foot(_, 0) => (cy_rr, invly, None),
+        Ph::Foot(_, 1) => (lam18, light[0], None),
+        Ph::Foot(_, 2) => (lam18, light[1], None),
+        Ph::Foot(_, 3) => (lam18, light[2], None),
+        _ => (0, 0, None),
+    };
+    reg(clk) prod: int<36> = smul18(ma, mb);
+    reg(clk) ptag: Option<uint<2>> reset(rst: None) = tag;
+
+    // ------------------------------------------------------ dot products
+    let lset = match ph { Ph::Lset(_, _) => true, _ => false };
+    let lw0: int<19> = target[0] - eye[0];
+    let lw1: int<19> = target[1] - eye[1];
+    let lw2: int<19> = target[2] - eye[2];
+    reg(clk) lv: [int<18>; 3] reset(rst: [0, 0, 0]) = if lset { [sat19(lw0), sat19(lw1), sat19(lw2)] } else { lv };
+    reg(clk) ovf reset(rst: false) = if lset { big19(lw0) || big19(lw1) || big19(lw2) } else { ovf };
+    let p40: int<40> = sext(prod);
+    reg(clk) acc0: int<40> reset(rst: 0) = if lset { 0 } else if ptag == Some(0) { acc0 +. p40 } else { acc0 };
+    reg(clk) acc1: int<40> reset(rst: 0) = if lset { 0 } else if ptag == Some(1) { acc1 +. p40 } else { acc1 };
+    reg(clk) acc2: int<40> reset(rst: 0) = if lset { 0 } else if ptag == Some(2) { acc2 +. p40 } else { acc2 };
+
+    let post0 = match ph { Ph::Post(_, _, 0) => true, _ => false };
+    let post1 = match ph { Ph::Post(_, _, 1) => true, _ => false };
+    let post2 = match ph { Ph::Post(_, _, 2) => true, _ => false };
+    let post3 = match ph { Ph::Post(_, _, 3) => true, _ => false };
+    reg(clk) zc: int<18> reset(rst: 0) = if post0 { sat18(acc0 >>> 16) } else { zc };
+    reg(clk) xc: int<18> reset(rst: 0) = if post0 { sat18(acc1 >>> 16) } else { xc };
+    reg(clk) yc: int<18> reset(rst: 0) = if post0 { sat18(acc2 >>> 16) } else { yc };
+    reg(clk) rkx: int<18> reset(rst: 0) = if post1 { trunc(prod >>> 16) } else { rkx };
+    reg(clk) rky: int<18> reset(rst: 0) = if post2 { trunc(prod >>> 16) } else { rky };
+    reg(clk) den: int<36> reset(rst: 0) = if post3 { prod } else { den };
+    reg(clk) full reset(rst: false) = if post3 { ovf || zc <= 64 || prod <= 0 } else { full };
+
+    // --------------------------------------------------------- divisions
+    // n0 = xc - rkx, n1 = -(xc + rkx), n2 = -yc - rky, n3 = yc - rky
+    let dn: uint<2> = match ph { Ph::Div(_, _, n) => n, Ph::DivWait(_, _, n) => n, _ => 0 };
+    let xc20: int<20> = sext(xc);
+    let yc20: int<20> = sext(yc);
+    let rkx20: int<20> = sext(rkx);
+    let rky20: int<20> = sext(rky);
+    let num: int<20> = match dn {
+        0 => xc20 -. rkx20,
+        1 => 0 -. (xc20 +. rkx20),
+        2 => (0 -. yc20) -. rky20,
+        _ => yc20 -. rky20,
+    };
+    let mag: uint<41> = zext(abs20(num)) << (if quality { 21u41 } else { 20u41 });
+    let ly = light[1];
+    let div_start: Option<(uint<41>, uint<36>)> = match ph {
+        Ph::Div(_, _, _) => Some((mag, den.as_uint())),
+        Ph::Inv => if ly > 2048 { Some((1u41 << 28u41, zext(ly.as_uint()))) } else { None },
+        _ => None,
+    };
+    let div_out = inst udiv(clk, rst, div_start);
+    let div_done = div_out.is_some();
+    let (dq, drnz) = match div_out { Some(r) => r, None => (0u17, false) };
+    // floor(num * 2^sh / den), saturated to +-1023
+    let qa: uint<18> = zext(dq) +. (if num < 0 && drnz { 1u18 } else { 0u18 });
+    let qsat: uint<10> = if qa > 1023 { 1023 } else { trunc(qa) };
+    let q12: int<12> = if num < 0 { 0 -. zext(qsat).as_int() } else { zext(qsat).as_int() };
+    let dwait = match ph { Ph::DivWait(_, _, _) => true, _ => false };
+    let qn = dwait && div_done;
+    reg(clk) qv: [int<12>; 4] reset(rst: [0, 0, 0, 0]) = [
+        if qn && dn == 0 { q12 } else { qv[0] },
+        if qn && dn == 1 { q12 } else { qv[1] },
+        if qn && dn == 2 { q12 } else { qv[2] },
+        if qn && dn == 3 { q12 } else { qv[3] },
+    ];
+
+    // --------------------------------------------------- frame constants
+    let k1 = match ph { Ph::K1 => true, _ => false };
+    let k2 = match ph { Ph::K2 => true, _ => false };
+    let kp: int<18> = trunc(prod >>> 15);
+    reg(clk) kx: int<18> reset(rst: 65536) = if k1 { 65536 +. kp } else { kx };
+    reg(clk) ky: int<18> reset(rst: 65536) = if k2 { 65536 +. kp } else { ky };
+    let invly_wait = match ph { Ph::InvWait => true, _ => false };
+    let in_invly = match ph { Ph::Inv => true, _ => false };
+    reg(clk) invly: int<18> reset(rst: 0) = if invly_wait && div_done { zext(dq).as_int() } else { invly };
+    reg(clk) invly_ok reset(rst: false) = if in_invly { ly > 2048 } else { invly_ok };
+
+    // ------------------------------------------------------- shadow foot
+    let f2 = match ph { Ph::Foot(_, 2) => true, _ => false };
+    let f3 = match ph { Ph::Foot(_, 3) => true, _ => false };
+    let f4 = match ph { Ph::Foot(_, 4) => true, _ => false };
+    reg(clk) lam: int<24> reset(rst: 0) = if f1 { trunc(prod >>> 12) } else { lam };
+    let off: int<19> = trunc(prod >>> 16);
+    let fw: int<20> = sext(c[0]) - off;
+    let fy: int<20> = sext(c[1]) - off;
+    let fz: int<20> = sext(c[2]) - off;
+    reg(clk) foot: [int<18>; 3] reset(rst: [0, 0, 0]) = [
+        if f2 { sat20(fw) } else { foot[0] },
+        if f3 { sat20(fy) } else { foot[1] },
+        if f4 { sat20(fz) } else { foot[2] },
+    ];
+    reg(clk) foot_ok reset(rst: false) = if f1 { true }
+        else if f2 { foot_ok && lam <= 131071 && lam >= 0 && !big20(fw) }
+        else if f3 { foot_ok && !big20(fy) }
+        else if f4 { foot_ok && !big20(fz) }
+        else { foot_ok };
+    let foot_ok_now = foot_ok && !big20(fz);
+
+    // ------------------------------------------------------------- boxes
+    let wh: int<12> = if quality { 320 } else { 160 };
+    let hh: int<12> = if quality { 240 } else { 120 };
+    let wm1: int<12> = if quality { 639 } else { 319 };
+    let hm1: int<12> = if quality { 479 } else { 239 };
+    let x0: int<12> = wh -. 2 +. qv[0];
+    let x1: int<12> = wh +. 1 -. qv[1];
+    let y0: int<12> = hh -. 2 +. qv[2];
+    let y1: int<12> = hh +. 1 -. qv[3];
+    let offscreen = x0 > wm1 || x1 < 0 || y0 > hm1 || y1 < 0;
+    let fb = full_box(quality);
+    let clamped = if full { fb } else {
+        Box$(on: true, x0: clampx(x0, wm1), x1: clampx(x1, wm1), y0: clampy(y0, hm1), y1: clampy(y1, hm1))
+    };
+    let off_box = Box$(on: false, x0: 0, x1: 0, y0: 0, y1: 0);
+    let store = match ph { Ph::Store(_, _) => true, _ => false };
+    let store_a = store && tb == 0;
+    let store_b = store && tb == 1;
+    let sph_box = if !full && offscreen { off_box } else { clamped };
+    reg(clk) keep_a: Box reset(rst: fb) = if store_a { clamped } else { keep_a };
+    let no_foot_a = store_a && !invly_ok;
+    let no_foot_f = f4 && !foot_ok_now;
+    reg(clk) sph: [Box; 6] reset(rst: [fb, fb, fb, fb, fb, fb]) = setb(sph, ti, store_a, sph_box);
+    reg(clk) shd: [Box; 6] reset(rst: [fb, fb, fb, fb, fb, fb]) =
+        setb(setb(shd, ti, no_foot_a || no_foot_f, fb), ti, store_b, union(keep_a, clamped));
+
+    // ------------------------------------------------------------ sequence
+    reg(clk) ph reset(rst: Ph::Idle) = match ph {
+        Ph::Idle => if start { Ph::K0 } else { Ph::Idle },
+        Ph::K0 => Ph::K1,
+        Ph::K1 => Ph::K2,
+        Ph::K2 => Ph::Inv,
+        Ph::Inv => if ly > 2048 { Ph::InvWait } else { Ph::Lset(0, 0) },
+        Ph::InvWait => if div_done { Ph::Lset(0, 0) } else { ph },
+        Ph::Lset(i, b) => Ph::Dot(i, b, 0),
+        Ph::Dot(i, b, k) => if k == 9 { Ph::Post(i, b, 0) } else { Ph::Dot(i, b, trunc(k + 1)) },
+        Ph::Post(i, b, k) => if k == 3 { Ph::Div(i, b, 0) } else { Ph::Post(i, b, trunc(k + 1)) },
+        Ph::Div(i, b, n) => Ph::DivWait(i, b, n),
+        Ph::DivWait(i, b, n) => if div_done {
+            if n == 3 { Ph::Store(i, b) } else { Ph::Div(i, b, trunc(n + 1)) }
+        } else {
+            ph
+        },
+        Ph::Store(i, b) => if b == 0 {
+            if invly_ok { Ph::Foot(i, 0) } else { if i == 5 { Ph::Done } else { Ph::Lset(trunc(i + 1), 0) } }
+        } else {
+            if i == 5 { Ph::Done } else { Ph::Lset(trunc(i + 1), 0) }
+        },
+        Ph::Foot(i, k) => if k == 4 {
+            if foot_ok_now { Ph::Lset(i, 1) } else { if i == 5 { Ph::Done } else { Ph::Lset(trunc(i + 1), 0) } }
+        } else {
+            Ph::Foot(i, trunc(k + 1))
+        },
+        Ph::Done => Ph::Idle,
+    };
+    let done = match ph { Ph::Done => true, _ => false };
+
+    ProjOut$(sph: sph, shd: shd, done: done)
+}

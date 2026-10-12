@@ -18,6 +18,7 @@ mod sdram;
 mod framebuffer;
 mod fx;
 mod animator;
+mod projector;
 mod ray_unit;
 mod shade_unit;
 mod tracer;
@@ -120,12 +121,20 @@ entity top(
     let p = ctl.params;
 
     // --------------------------------------------- scanout requests (pixel)
-    // The front buffer's resolution, taken once per frame at line 0 (it only
-    // changes when the buffers swap, during vertical blanking).
+    // The front buffer's mode, checkerboard phase and whether the previous
+    // frame merges with it, taken once per frame at line 0 (they only change
+    // when the buffers rotate, during vertical blanking).
     let t = inst video::video_timing(clk_pix, rst_pix);
     let (front_quality, front_quality_inv) = port();
+    let (front_phase, front_phase_inv) = port();
+    let (merge, merge_inv) = port();
     let fq_pix = inst std::cdc::sync2_bool(clk_pix, front_quality);
-    reg(clk_pix) qmode reset(rst_pix: false) = if t.x == 0 && t.y == 0 { fq_pix } else { qmode };
+    let fp_pix = inst std::cdc::sync2_bool(clk_pix, front_phase);
+    let mg_pix = inst std::cdc::sync2_bool(clk_pix, merge);
+    let line0 = t.x == 0 && t.y == 0;
+    reg(clk_pix) qmode reset(rst_pix: false) = if line0 { fq_pix } else { qmode };
+    reg(clk_pix) fphase reset(rst_pix: false) = if line0 { fp_pix } else { fphase };
+    reg(clk_pix) mmode reset(rst_pix: false) = if line0 { mg_pix } else { mmode };
     // 320x240: source line n+1 at even display lines (each line shows twice);
     // 640x480: line y+1 at every display line y.
     let even_line = !t.y.as_bits()[0];
@@ -154,13 +163,23 @@ entity top(
     let (line_done, line_done_inv) = port();
     let (frame_begin, frame_begin_inv) = port();
     let (render_quality, render_quality_inv) = port();
+    let (render_phase, render_phase_inv) = port();
     let fb = inst framebuffer::framebuffer(
-        clk_core, rst, scan_req, line_done, frame_begin, render_quality, sd_accept, sd_write_done, sd_fill);
+        clk_core, rst, scan_req, line_done, frame_begin, render_quality, render_phase, sd_accept, sd_write_done,
+        sd_fill);
     set front_quality_inv = fb.front_quality;
+    set front_phase_inv = fb.front_phase;
+    set merge_inv = fb.merge;
 
-    let (buf_write, buf_write_inv) = port();
+    // Render line buffer: even and odd pixels in separate halves, written one
+    // pixel at a time by the tracer and read as words by the SDRAM controller.
+    let (buf_even, buf_even_inv) = port();
+    let (buf_odd, buf_odd_inv) = port();
     let (wbuf_addr, wbuf_addr_inv) = port();
-    let wdata = inst framebuffer::line_ram(clk_core, buf_write, clk_core, fb.wbuf_slot.concat(wbuf_addr));
+    let wb_addr = fb.wbuf_slot.concat(wbuf_addr);
+    let w_even = inst framebuffer::line_ram16(clk_core, buf_even, clk_core, wb_addr);
+    let w_odd = inst framebuffer::line_ram16(clk_core, buf_odd, clk_core, wb_addr);
+    let wdata: uint<32> = w_odd.concat(w_even);
 
     let (dq_read, dq_write) = IO_sdram_dq.read_write();
     let (dq_in, dq_in_inv) = port();
@@ -186,37 +205,44 @@ entity top(
     let cam = inst camera::camera_setup(clk_core, rst, cam_start, p.cam);
     let r = inst tracer::tracer(
         clk_core, rst, fb.may_start && sd.ready, p.freeze, p.test_pattern, p.quality, p.scene, p.anim,
-        cam.out, cam.done, fb.slot_free);
+        p.cam.fov, cam.out, cam.done, fb.slot_free);
     set cam_start_inv = r.cam_start;
     set frame_tick_inv = r.frame_tick;
     set frame_begin_inv = r.frame_begin;
-    set buf_write_inv = r.buf_write;
+    set buf_even_inv = r.buf_even;
+    set buf_odd_inv = r.buf_odd;
     set line_done_inv = r.line_done;
     set render_quality_inv = r.quality;
+    set render_phase_inv = r.phase;
     set cycles_inv = trunc(r.cycles >> 8);
 
     reg(clk_core) frame_count: uint<16> reset(rst: 0) = if r.frame_begin { frame_count +. 1 } else { frame_count };
     set frames_inv = frame_count;
-    set status_inv = (if sd.ready { 1u16 } else { 0u16 }) | (if fb.front { 2u16 } else { 0u16 });
+    set status_inv = (if sd.ready { 1u16 } else { 0u16 })
+        | (if fb.front_quality { 2u16 } else { 0u16 })
+        | (if fb.merge { 4u16 } else { 0u16 });
 
     // ---------------------------------------------------- scanout (pixel)
-    // Scanout RAM address {slot, half, word}: 320x240 shows each pixel twice
-    // and each line twice; 640x480 reads both halves of one line.
-    let right = t.x >= 320;
-    let xi: uint<10> = if right { t.x -. 320 } else { t.x };
-    let scan_addr: uint<10> = if qmode {
-        let slot: uint<1> = trunc(t.y);
-        let word: uint<8> = trunc(xi >> 1);
-        slot.concat(if right { 1u1 } else { 0u1 }).concat(word)
-    } else {
-        let slot: uint<1> = trunc(t.y >> 1);
-        let word: uint<8> = trunc(t.x >> 2);
-        slot.concat(0u1).concat(word)
-    };
-    let pair = inst framebuffer::scan_ram(clk_core, fb.scan_write, clk_pix, scan_addr);
+    // Both modes store 320 pixels per line, so pixel x is at word x / 4,
+    // half (x / 2) & 1, of a line: 320x240 shows each pixel and line twice;
+    // 640x480 takes a pixel from the front frame where its checkerboard
+    // phase traced it, and from the previous frame (the other phase) where
+    // not. Without a previous frame to merge, a pixel repeats its neighbour.
+    let slot: uint<1> = if qmode { trunc(t.y) } else { trunc(t.y >> 1) };
+    let word: uint<8> = trunc(t.x >> 2);
+    let scan_addr: uint<9> = slot.concat(word);
+    let sw = match fb.scan_write { Some((a, d)) => Some((a, d)), None => None };
+    let sw_front = match sw { Some((a, d)) => if !a.as_bits()[9] { Some((trunc(a), d)) } else { None }, None => None };
+    let sw_prev = match sw { Some((a, d)) => if a.as_bits()[9] { Some((trunc(a), d)) } else { None }, None => None };
+    let pair_f = inst framebuffer::line_ram(clk_core, sw_front, clk_pix, scan_addr);
+    let pair_p = inst framebuffer::line_ram(clk_core, sw_prev, clk_pix, scan_addr);
+    let o_front = t.y.as_bits()[0] != fphase;
+    let from_prev = qmode && mmode && (t.x.as_bits()[0] != o_front);
     // Delay timing by the one-cycle line RAM read.
     reg(clk_pix) t_d = t;
-    reg(clk_pix) half_d = if qmode { t.x.as_bits()[0] } else { t.x.as_bits()[1] };
+    reg(clk_pix) half_d = t.x.as_bits()[1];
+    reg(clk_pix) prev_d = from_prev;
+    let pair: uint<32> = if prev_d { pair_p } else { pair_f };
     let px: uint<16> = if half_d { trunc(pair >> 16) } else { trunc(pair) };
     let (red, green, blue) = video::rgb565_to_888(px);
     let ctrl0: uint<2> = (if t_d.vsync { 2u2 } else { 0u2 }) | (if t_d.hsync { 1u2 } else { 0u2 });

@@ -36,6 +36,11 @@ pub struct CamOut {
     du: [int<28>; 3],
     dv: [int<28>; 3],
     light: [int<18>; 3],
+    // Camera basis (s1.16) and pixel step s (.24), for the projector.
+    fwd: [int<18>; 3],
+    right: [int<18>; 3],
+    up: [int<18>; 3],
+    s: int<28>,
 }
 
 pub struct CamResult {
@@ -252,6 +257,10 @@ pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> Cam
         du: [regs[16], 0, regs[17]],
         dv: [regs[18], regs[19], regs[20]],
         light: [narrow(regs[26]), narrow(regs[6]), narrow(regs[27])],
+        fwd: [narrow(0 -. regs[8]), narrow(0 -. regs[2]), narrow(0 -. regs[9])],
+        right: [narrow(regs[1]), 0, narrow(0 -. regs[0])],
+        up: [narrow(0 -. regs[10]), narrow(regs[3]), narrow(0 -. regs[11])],
+        s: regs[15],
     );
     CamResult$(out: out, done: done)
 }

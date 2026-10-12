@@ -36,6 +36,10 @@ pub struct RuOut {
     t: int<18>,
     hit: bool,
     dn: [int<18>; 3],
+    // The input ray, passed through so the shading unit can be fed straight
+    // from the last intersection sweep.
+    o: [int<18>; 3],
+    d: [int<18>; 3],
 }
 
 fn sat19(v: int<19>) -> int<18> {
@@ -118,7 +122,7 @@ pub pipeline(14) ray_unit(clk: clock, inp: Option<RuIn>) -> Option<RuOut> {
     reg;
         let t18: int<18> = trunc(t);
         if valid {
-            Some(RuOut$(mode: q.mode, idx: q.idx, obj: q.obj, t: t18, hit: hit && !is_gen, dn: dn))
+            Some(RuOut$(mode: q.mode, idx: q.idx, obj: q.obj, t: t18, hit: hit && !is_gen, dn: dn, o: q.o, d: q.d))
         } else {
             None
         }

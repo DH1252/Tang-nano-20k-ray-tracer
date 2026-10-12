@@ -97,7 +97,7 @@ REGS = {
     "sun_speed": (0x0C, lambda s: speed_enc(float(s)), speed_dec, "deg/frame"),
     "sdram_rd_lat": (0x0D, lambda s: int(s, 0), int, "cycles"),
     "frames": (0x0E, None, int, ""),
-    "status": (0x0F, None, lambda v: f"sdram_ready={v & 1} front_buffer={(v >> 1) & 1}", ""),
+    "status": (0x0F, None, lambda v: f"sdram_ready={v & 1} shown_640x480={(v >> 1) & 1} merged={(v >> 2) & 1}", ""),
     "anim": (0x10, lambda s: int(s, 0) & 0xFFFF, lambda v: f"0x{v:04x}", ""),
     "anim_speed": (0x11, lambda s: int(s, 0) & 0xFFFF, lambda v: f"0x{v:04x}", "per frame"),
     "scene": (0x12, lambda s: int(s, 0), scene_dec, ""),
