@@ -24,29 +24,42 @@ the UART:
 
 ## Build and program
 
-The default flow is **Gowin EDA** (GowinSynthesis plus Gowin place and route)
-driven headless through `gw_sh`. You need:
-- [swim](https://codeberg.org/spade-lang/swim) (`cargo install --git https://codeberg.org/spade-lang/swim`)
-- Gowin EDA; the free Education edition (V1.9.11.03 for Linux) supports the GW2AR-18C.
+The build uses **Gowin EDA** (GowinSynthesis plus Gowin place and route)
+through a normal Gowin project, `gowin/tn20k_raytracer/tn20k_raytracer.gprj`.
+You also need [swim](https://codeberg.org/spade-lang/swim) to turn the Spade
+sources into Verilog:
 
 ```
-GOWIN_HOME=/opt/gowin scripts/build.sh     # -> build/gowin/impl/pnr/tn20k_raytracer.fs
-openFPGALoader -b tangnano20k build/gowin/impl/pnr/tn20k_raytracer.fs   # load to SRAM
+cargo install --git https://codeberg.org/spade-lang/swim
 ```
 
-`scripts/build.sh` sets `QT_QPA_PLATFORM=offscreen`, so no display is needed.
-It also preloads the system libfreetype, because the one Gowin bundles breaks
-on current distributions. Two things in the Spade output have to be adapted
-for Gowin's tools:
-- **Escaped identifiers:** Spade uses names like `\_` for anonymous
-  registers, which Gowin's place and route cannot read back from the
-  synthesised netlist. `scripts/plain_identifiers.py` rewrites them;
-  `PLAIN=1 sim/run.sh` simulates that rewritten file.
-- **Large ROM constants:** constants over 2^16 bits are not accepted, so the
-  sine table is stored as a quarter wave.
+**In the Gowin IDE:**
+1. Run `scripts/build.sh prepare`. It generates `build/spade_plain.v`, the
+   Verilog the project uses. Run it again after changing any `.spade` file.
+2. Open `gowin/tn20k_raytracer/tn20k_raytracer.gprj` and press *Run All*.
 
-Pin and timing constraints: `constraints/tangnano20k.cst` and
-`constraints/tangnano20k.sdc`. The Gowin project script is `gowin/build.tcl`.
+**From the command line** (same project, headless `gw_sh`):
+
+```
+GOWIN_HOME=/path/to/Gowin scripts/build.sh   # -> gowin/tn20k_raytracer/impl/pnr/tn20k_raytracer.fs
+openFPGALoader -b tangnano20k gowin/tn20k_raytracer/impl/pnr/tn20k_raytracer.fs   # load to SRAM
+```
+
+Notes on the Gowin flow:
+- **Project contents:** the project lists the generated Verilog, the Verilog
+  primitive wrappers in `rtl/`, and the pin and timing constraints
+  (`constraints/tangnano20k.cst`, `constraints/tangnano20k.sdc`). Options are
+  top module `top` and SystemVerilog 2017. `gowin/create_project.tcl`
+  regenerates the project.
+- **Headless Linux:** `scripts/build.sh` sets `QT_QPA_PLATFORM=offscreen`, so
+  no display is needed. It also preloads the system libfreetype, because some
+  Gowin releases bundle one that breaks on current distributions.
+- **Escaped identifiers:** Spade names anonymous registers `\_`, and Gowin's
+  place and route cannot read those back from the synthesised netlist.
+  `scripts/plain_identifiers.py` (run by `prepare`) rewrites them;
+  `PLAIN=1 sim/run.sh` simulates the rewritten file.
+- **Large constants:** Gowin rejects constants over 2^16 bits, so the sine
+  table is stored as a quarter wave.
 
 `scripts/build_oss.sh` is the open-source alternative (Yosys, nextpnr-himbaechel,
 apicula). It produced the only full build so far:
@@ -105,7 +118,7 @@ SDRAM timing and TMDS symbols.
 src/            Spade RTL (main.spade is the top level)
 rtl/            Verilog: Gowin primitive wrappers, SDRAM read capture
 constraints/    pin (.cst) and timing (.sdc) constraints
-gowin/          Gowin EDA project script (gw_sh)
+gowin/          Gowin EDA project (.gprj) and gw_sh scripts
 test/           cocotb tests          sim/      system testbench and models
 model/          Python models         scripts/  build and table generation
 tools/          host tools            docs/     plan, UART protocol

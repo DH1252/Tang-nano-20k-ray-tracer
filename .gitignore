@@ -2,3 +2,7 @@ build/
 sim_out/
 .surfer/
 __pycache__/
+# Gowin EDA outputs (keep the project and its option file)
+gowin/tn20k_raytracer/impl/*
+!gowin/tn20k_raytracer/impl/tn20k_raytracer_process_config.json
+gowin/tn20k_raytracer/*.gprj.user

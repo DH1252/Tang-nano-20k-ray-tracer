@@ -377,7 +377,7 @@ src/*.spade              RTL: top (main), video, uart, control, camera, sfu,
 rtl/dq_capture.v         SDRAM read capture on the falling edge
 rtl/gowin/*.v            rPLL/CLKDIV clocks, OSER10 + TLVDS DVI PHY, ODDR SDRAM clock
 constraints/             tangnano20k.cst (pins), tangnano20k.sdc (timing)
-gowin/build.tcl          Gowin EDA project script
+gowin/                   Gowin EDA project (.gprj) and gw_sh scripts
 model/hw.py              bit-exact Python model of the RTL arithmetic
 model/feasibility.py     float vs fixed-point study for the full tracer
 test/*.py                cocotb unit tests (swim test)
@@ -388,10 +388,10 @@ tools/rtctl.py           host-side UART control
 docs/                    this plan, UART protocol, images
 ```
 
-- **Build:** `swim build` (Spade to Verilog), identifier rewrite
-  (`scripts/plain_identifiers.py`), then Gowin EDA's `gw_sh` for synthesis,
-  place and route, timing and bitstream (`scripts/build.sh`, `gowin/build.tcl`,
-  constraints in `constraints/`). The open-source flow (Yosys,
+- **Build:** `swim build` (Spade to Verilog) and an identifier rewrite
+  (`scripts/plain_identifiers.py`), then Gowin EDA builds the project
+  `gowin/tn20k_raytracer/tn20k_raytracer.gprj`: in the IDE, or headless with
+  `gw_sh` through `scripts/build.sh`. Constraints are in `constraints/`. The open-source flow (Yosys,
   nextpnr-himbaechel, apicula) remains available as `scripts/build_oss.sh`.
 - **Simulation:** cocotb + Icarus through `swim test` for units, and Verilator
   for the full system (`sim/run.sh`).
