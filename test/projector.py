@@ -43,6 +43,12 @@ async def projector_matches_model(dut):
                  ty=random.randrange(0, 0x4000), light_az=random.randrange(65536),
                  light_el=random.choice([random.randrange(0, 0x4000), 0x0100, 0x0200]))
         cases.append((p, dict(hw.DEFAULT_SCENE, anim=random.randrange(65536)), random.random() < 0.5))
+    # Views with divisions that saturate (quotient >= 2^17): the divider
+    # answers those at once, which must not lose the result.
+    cases.append((dict(hw.DEFAULT_PARAMS, yaw=36763, pitch=62984, dist=9630, ty=12616, fov=4423,
+                       light_az=51077, light_el=8273), dict(hw.DEFAULT_SCENE, anim=17203), True))
+    cases.append((dict(hw.DEFAULT_PARAMS, yaw=48401, pitch=4295, dist=41241, ty=7158, fov=25798,
+                       light_az=20049, light_el=1612), dict(hw.DEFAULT_SCENE, anim=46050), True))
     for p, sc, q in cases:
         cam = hw.camera(p)
         cen = hw.animate(sc["anim"])

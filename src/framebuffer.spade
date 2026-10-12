@@ -164,15 +164,21 @@ pub entity framebuffer(
         _ => None,
     };
 
+    // Registered: these cross into the pixel domain through synchronisers,
+    // which must see a flip-flop, not logic that can glitch.
+    reg(clk) front_quality_r reset(rst: false) = mf.quality;
+    reg(clk) front_phase_r reset(rst: false) = mf.phase;
+    reg(clk) merge_r reset(rst: false) = merge;
+
     FbOut$(
         req: req,
         scan_write: scan_write,
         wbuf_slot: match inflight { Inflight::Write(s) => s, _ => next_wslot },
         slot_free: [wpend0.is_none() && !busy0, wpend1.is_none() && !busy1],
         may_start: !rendering && !frame_done,
-        front_quality: mf.quality,
-        front_phase: mf.phase,
-        merge: merge,
+        front_quality: front_quality_r,
+        front_phase: front_phase_r,
+        merge: merge_r,
     )
 }
 

@@ -38,10 +38,12 @@ pub struct ProjOut {
 }
 
 // floor(mag / den) to 17 bits, one quotient bit per cycle, with a flag for a
-// non-zero remainder. A quotient of 2^17 or more saturates.
+// non-zero remainder. A quotient of 2^17 or more saturates. The result is
+// registered, so it always arrives at least one cycle after the start.
 struct DivState {
     rem: uint<41>,
-    den: uint<36>,
+    // den << b, for quotient bit b
+    d: uint<53>,
     q: uint<17>,
     b: uint<5>,
 }
@@ -54,27 +56,28 @@ entity udiv(clk: clock, rst: bool, start: Option<(uint<41>, uint<36>)>) -> Optio
             if zext(mag) >= big {
                 (None, Some((0x1ffff, true)))
             } else {
-                (Some(DivState$(rem: mag, den: den, q: 0, b: 16)), None)
+                let d: uint<53> = zext(den) << 16u53;
+                (Some(DivState$(rem: mag, d: d, q: 0, b: 16)), None)
             }
         },
         None => match st {
             Some(s) => {
-                let d: uint<53> = zext(s.den) << zext(s.b);
-                let take = zext(s.rem) >= d;
-                let rem: uint<41> = if take { trunc(zext(s.rem) - d) } else { s.rem };
-                let bit: uint<17> = 1u17 << zext(s.b);
-                let q: uint<17> = if take { s.q | bit } else { s.q };
+                let take = zext(s.rem) >= s.d;
+                let rem: uint<41> = if take { trunc(zext(s.rem) - s.d) } else { s.rem };
+                let tb: uint<17> = if take { 1 } else { 0 };
+                let q: uint<17> = trunc(s.q << 1u17) | tb;
                 if s.b == 0 {
                     (None, Some((q, rem != 0)))
                 } else {
-                    (Some(DivState$(rem: rem, den: s.den, q: q, b: trunc(s.b - 1))), None)
+                    (Some(DivState$(rem: rem, d: s.d >> 1u53, q: q, b: trunc(s.b - 1))), None)
                 }
             },
             None => (None, None),
         },
     };
     reg(clk) st: Option<DivState> reset(rst: None) = nst;
-    out
+    reg(clk) out_r: Option<(uint<17>, bool)> reset(rst: None) = out;
+    out_r
 }
 
 enum Ph {

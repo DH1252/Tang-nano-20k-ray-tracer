@@ -113,13 +113,16 @@ apicula); it has not been run on the tracer.
 Resources from a GowinSynthesis run of this version (V1.9.11.03, synthesis
 only, before place and route, so fmax is an estimate):
 
-| Logic (LUT + ALU) | Registers | Block RAM | 18×18 multipliers | PLLs | core fmax estimate (needed) |
-|-------------------|-----------|-----------|-------------------|------|-----------------------------|
-| 10,821 / 20,736 (52 %) | 5,060 / 15,552 | 30 / 46 | ≈ 43.5 / 48 | 2 / 2 | 77.6 MHz (54) |
+| Logic (LUT + ALU + RAM16) | Registers | Block RAM | 18×18 multipliers | PLLs | core fmax estimate (needed) |
+|---------------------------|-----------|-----------|-------------------|------|-----------------------------|
+| 14,374 / 20,736 (70 %) | 6,412 / 15,552 | 35 / 46 | ≈ 44.5 / 48 | 2 / 2 | 63.3 MHz (54) |
 
-The multiplier count adds up 17 MULT18X18, 11 MULTADDALU18X18 and 2
+The multiplier count adds up 18 MULT18X18, 11 MULTADDALU18X18 and 2
 MULTALU36X18 (two multipliers each), and 1 MULT9X9. The colour products are
-built from logic to leave the DSPs to the vector maths.
+built from logic to leave the DSPs to the vector maths. The synthesis
+estimate does not apply the constraint file's asynchronous clock groups, so
+its worst paths are clock-domain crossings that place and route ignores; the
+place-and-route timing report is the one that counts.
 
 ## Control it
 
