@@ -51,6 +51,18 @@ Notes on the Gowin flow:
   (`constraints/tangnano20k.cst`, `constraints/tangnano20k.sdc`). Options are
   top module `top` and SystemVerilog 2017. `gowin/create_project.tcl`
   regenerates the project.
+- **Timing-optimised settings:** `gowin/timing_options.tcl` holds the
+  settings, taken from SUG1220-2.1E.
+  - Synthesis: `-opt_goal timing`, `-map_option 4`, `-netlist_hierarchy 0`
+    (flatten) and `-max_fanout 100`.
+  - Place and route: timing-driven, `-place_option 2`, `-route_option 1`,
+    resource replication, `-retiming_resource all`, clocks routed fastest
+    first, hold fixing, and I/O registers in the IOBs.
+  - `scripts/build.sh` applies them on every build. The committed project
+    stores the place-and-route ones. Releases older than the 2.0E command set
+    (for example V1.9.11.03) skip the newer synthesis options with a message.
+  - In the IDE, run `source <repo>/gowin/timing_options.tcl` once in the Tcl
+    console and save the project, so your release stores all of them.
 - **Headless Linux:** `scripts/build.sh` sets `QT_QPA_PLATFORM=offscreen`, so
   no display is needed. It also preloads the system libfreetype, because some
   Gowin releases bundle one that breaks on current distributions.
