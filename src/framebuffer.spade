@@ -1,45 +1,59 @@
-// Double-buffered 320x240 RGB565 framebuffer in SDRAM.
+// Double-buffered RGB565 framebuffer in SDRAM, 320x240 or 640x480.
 //
-// SDRAM row layout: row = {buffer, y}, bank 0. Each row holds one scanline as
-// 160 words of two pixels (left pixel in the low half).
+// SDRAM layout: a 320-pixel segment is one row of 160 words (two pixels per
+// word, left pixel in the low half). Line y of buffer b is row {b, y}; at
+// 640x480 its left half is in bank 0 and its right half in bank 1.
 //
-// Scanout asks for source line n (two display lines ahead) and it is copied
-// into scanout slot n & 1. The renderer fills two line-buffer slots in turn;
-// each finished slot is written to the back buffer. The front/back buffers
-// swap when scanout asks for line 0 (during vertical blanking), but only once
-// the renderer has written a complete frame, so the picture never tears.
+// Scanout asks for source line n ahead of time and it is copied into scanout
+// slot n & 1 (both halves at 640x480). The renderer fills two line-buffer
+// slots in turn; each finished slot is written to the back buffer. The
+// buffers swap when scanout asks for line 0 (during vertical blanking), but
+// only once the renderer has written a complete frame, so the picture never
+// tears. A frame's resolution travels with it: `front_quality` tells scanout
+// how to read the buffer it is showing.
 
 use lib::sdram::Request;
 
 pub struct FbOut {
     req: Option<Request>,
-    // Write into the scanout line buffer: (address {slot, column}, word).
-    scan_write: Option<(uint<9>, uint<32>)>,
+    // Write into the scanout line buffer: (address {slot, half, column}, word).
+    scan_write: Option<(uint<10>, uint<32>)>,
     // Render line-buffer slot the SDRAM controller is reading from.
     wbuf_slot: uint<1>,
     slot_free: [bool; 2],
     // The renderer may begin a new frame.
     may_start: bool,
     front: bool,
+    // The front buffer holds a 640x480 frame.
+    front_quality: bool,
 }
 
 enum Inflight {
     Nothing,
-    Read{slot: uint<1>},
+    Read{slot: uint<1>, half: uint<1>},
     Write{slot: uint<1>},
+}
+
+fn buf_row(buffer: bool, y: uint<9>) -> uint<11> {
+    let b: uint<1> = if buffer { 1 } else { 0 };
+    zext(b.concat(y))
 }
 
 pub entity framebuffer(
     clk: clock,
     rst: bool,
-    scan_req: Option<uint<8>>,
-    line_done: Option<(uint<1>, uint<8>)>,
+    scan_req: Option<uint<9>>,
+    // A render slot is complete: (slot, y, half).
+    line_done: Option<(uint<1>, uint<9>, uint<1>)>,
     frame_begin: bool,
+    // Resolution of the frame being rendered (stable once it has begun).
+    render_quality: bool,
     accept: bool,
     write_done: bool,
     fill: Option<(uint<8>, uint<32>)>,
 ) -> FbOut {
-    decl front, rendering, frame_done, lines_written, scan_pending, wpend0, wpend1, next_wslot, inflight;
+    decl front, front_q, done_q, rendering, frame_done, lines_written, scan_pending, wpend0, wpend1,
+        next_wslot, inflight;
 
     let is_idle = match inflight { Inflight::Nothing => true, _ => false };
     let wpend_next = if next_wslot == 0 { wpend0 } else { wpend1 };
@@ -49,9 +63,9 @@ pub entity framebuffer(
         None
     } else {
         match scan_pending {
-            Some(line) => Some(Request$(write: false, row: zext((if front { 1u1 } else { 0u1 }).concat(line)))),
+            Some((line, half)) => Some(Request$(write: false, bank: zext(half), row: buf_row(front, line))),
             None => match wpend_next {
-                Some(y) => Some(Request$(write: true, row: zext((if front { 0u1 } else { 1u1 }).concat(y)))),
+                Some((y, half)) => Some(Request$(write: true, bank: zext(half), row: buf_row(!front, y))),
                 None => None,
             },
         }
@@ -59,59 +73,68 @@ pub entity framebuffer(
     let accept_read = accept && scan_pending.is_some();
     let accept_write = accept && !scan_pending.is_some();
 
-    let scan_slot: uint<1> = match scan_pending { Some(line) => trunc(line), None => 0 };
+    let (scan_line, scan_half): (uint<9>, uint<1>) = match scan_pending { Some(p) => p, None => (0, 0) };
+    let scan_slot: uint<1> = trunc(scan_line);
     let last_fill = match fill { Some((col, _)) => col == 159, None => false };
 
     reg(clk) inflight reset(rst: Inflight::Nothing) = if accept_read {
-        Inflight::Read(scan_slot)
+        Inflight::Read(scan_slot, scan_half)
     } else if accept_write {
         Inflight::Write(next_wslot)
     } else {
         match inflight {
-            Inflight::Read(s) => if last_fill { Inflight::Nothing } else { inflight },
-            Inflight::Write(s) => if write_done { Inflight::Nothing } else { inflight },
+            Inflight::Read(_, _) => if last_fill { Inflight::Nothing } else { inflight },
+            Inflight::Write(_) => if write_done { Inflight::Nothing } else { inflight },
             Inflight::Nothing => inflight,
         }
     };
 
     let swap = match scan_req { Some(line) => line == 0 && frame_done, None => false };
     reg(clk) front reset(rst: false) = if swap { !front } else { front };
+    reg(clk) front_q reset(rst: false) = if swap { done_q } else { front_q };
 
-    reg(clk) scan_pending: Option<uint<8>> reset(rst: None) = match scan_req {
-        Some(line) => Some(line),
-        None => if accept_read { None } else { scan_pending },
+    // A 640x480 line is fetched as two halves, one after the other.
+    reg(clk) scan_pending: Option<(uint<9>, uint<1>)> reset(rst: None) = match scan_req {
+        Some(line) => Some((line, 0)),
+        None => if accept_read {
+            if front_q && scan_half == 0 { Some((scan_line, 1)) } else { None }
+        } else {
+            scan_pending
+        },
     };
 
-    let line_slot0 = match line_done { Some((s, y)) => if s == 0 { Some(y) } else { None }, None => None };
-    let line_slot1 = match line_done { Some((s, y)) => if s == 1 { Some(y) } else { None }, None => None };
+    let line_slot0 = match line_done { Some((s, y, h)) => if s == 0 { Some((y, h)) } else { None }, None => None };
+    let line_slot1 = match line_done { Some((s, y, h)) => if s == 1 { Some((y, h)) } else { None }, None => None };
     let take0 = accept_write && next_wslot == 0;
     let take1 = accept_write && next_wslot == 1;
-    reg(clk) wpend0: Option<uint<8>> reset(rst: None) = match line_slot0 {
-        Some(y) => Some(y),
+    reg(clk) wpend0: Option<(uint<9>, uint<1>)> reset(rst: None) = match line_slot0 {
+        Some(p) => Some(p),
         None => if take0 { None } else { wpend0 },
     };
-    reg(clk) wpend1: Option<uint<8>> reset(rst: None) = match line_slot1 {
-        Some(y) => Some(y),
+    reg(clk) wpend1: Option<(uint<9>, uint<1>)> reset(rst: None) = match line_slot1 {
+        Some(p) => Some(p),
         None => if take1 { None } else { wpend1 },
     };
 
     let wrote_line = match inflight { Inflight::Write(_) => write_done, _ => false };
     reg(clk) next_wslot: uint<1> reset(rst: 0) =
         if frame_begin { 0 } else if wrote_line { ~next_wslot } else { next_wslot };
-    reg(clk) lines_written: uint<8> reset(rst: 0) =
+    reg(clk) lines_written: uint<10> reset(rst: 0) =
         if frame_begin { 0 } else if wrote_line { trunc(lines_written + 1) } else { lines_written };
-    let frame_complete = wrote_line && lines_written == 239;
+    let last_write: uint<10> = if render_quality { 959 } else { 239 };
+    let frame_complete = wrote_line && lines_written == last_write;
     reg(clk) rendering reset(rst: false) =
         if frame_begin { true } else if frame_complete { false } else { rendering };
     reg(clk) frame_done reset(rst: false) =
         if frame_complete { true } else if swap { false } else { frame_done };
+    reg(clk) done_q reset(rst: false) = if frame_complete { render_quality } else { done_q };
 
     let (busy0, busy1) = match inflight {
         Inflight::Write(s) => (s == 0, s == 1),
         _ => (false, false),
     };
     let scan_write = match (inflight, fill) {
-        (Inflight::Read(s), Some((col, word))) => Some((s.concat(col), word)),
+        (Inflight::Read(s, h), Some((col, word))) => Some((s.concat(h).concat(col), word)),
         _ => None,
     };
 
@@ -122,6 +145,7 @@ pub entity framebuffer(
         slot_free: [wpend0.is_none() && !busy0, wpend1.is_none() && !busy1],
         may_start: !rendering && !frame_done,
         front: front,
+        front_quality: front_q,
     )
 }
 
@@ -133,6 +157,17 @@ pub entity line_ram(wclk: clock, write: Option<(uint<9>, uint<32>)>, rclk: clock
         None => (false, 0u9, 0u32),
     };
     let mem: Memory<uint<32>, 512> = inst std::mem::clocked_memory(wclk, [w]);
+    reg(rclk) out = inst std::mem::read_memory(mem, raddr);
+    out
+}
+
+// The same with 1024 words: the scanout buffer (two 640-pixel lines).
+pub entity scan_ram(wclk: clock, write: Option<(uint<10>, uint<32>)>, rclk: clock, raddr: uint<10>) -> uint<32> {
+    let w = match write {
+        Some((a, d)) => (true, a, d),
+        None => (false, 0u10, 0u32),
+    };
+    let mem: Memory<uint<32>, 1024> = inst std::mem::clocked_memory(wclk, [w]);
     reg(rclk) out = inst std::mem::read_memory(mem, raddr);
     out
 }

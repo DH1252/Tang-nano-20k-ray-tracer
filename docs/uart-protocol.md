@@ -17,11 +17,17 @@ Lower-case keys act immediately and send nothing back:
 | `i` / `k` | sun elevation up / down          | 2.8°              |
 | `o`  | camera auto-orbit on / off            |                   |
 | `p`  | sun auto-motion on / off              |                   |
+| `m`  | sphere motion on / off                |                   |
+| `v`  | 640×480 quality mode on / off         |                   |
+| `b`  | reflection bounces: 0, 1, 2, 3, 0, …  |                   |
+| `r`  | floor reflectivity: 0, ¼, ½, ¾, 0, …  |                   |
 | `f`  | freeze frame (stop rendering)         |                   |
 | `t`  | test pattern (framebuffer bring-up)   |                   |
 | `c`  | reset every register to its default   |                   |
 
-The board buttons do the same as `o` (S1) and `p` (S2).
+The board buttons: **S1** pauses all motion (camera orbit, sun, spheres), or
+resumes all of it if everything is paused. **S2** switches the 640×480 quality
+mode on and off, like `v`.
 
 ## Line commands
 
@@ -48,7 +54,7 @@ All registers are 16 bits wide. Angles are fractions of a turn: `0x4000` is
 | Addr | Name          | Format                         | Default  | Notes |
 |------|---------------|--------------------------------|----------|-------|
 | 00   | id            | `0x5254` ("RT")                |          | read only |
-| 01   | ctrl          | bit 0 orbit, 1 sun motion, 2 freeze, 3 test pattern | `0x0003` | |
+| 01   | ctrl          | bit 0 orbit, 1 sun motion, 2 freeze, 3 test pattern, 4 sphere motion, 5 quality mode (640×480) | `0x0013` | |
 | 02   | yaw           | angle                          | `0x0000` | camera orbit angle around the target |
 | 03   | pitch         | angle, signed                  | `0x0700` | positive looks down from above (9.8°) |
 | 04   | dist          | u4.12 world units              | `0x6000` | camera distance from the target (6.0) |
@@ -63,10 +69,18 @@ All registers are 16 bits wide. Angles are fractions of a turn: `0x4000` is
 | 0D   | sdram_rd_lat  | 1..7 cycles                    | `4`      | SDRAM read capture latency, for hardware bring-up |
 | 0E   | frames        | count                          |          | read only: frames rendered |
 | 0F   | status        | bit 0 SDRAM ready, bit 1 front buffer |   | read only |
+| 10   | anim          | animation time                 | `0x0000` | sphere angles are `anim × k + phase` (see `SPHERES` in `scripts/gen_tables.py`) |
+| 11   | anim_speed    | added per frame                | `0x0040` | added to anim every rendered frame while sphere motion is on |
+| 12   | scene         | bits 1:0 bounces, 3:2 floor reflectivity (quarters), 6:4 spheres | `0x0061` | 1 bounce, matt floor, 6 spheres; more than 6 counts as 6 |
+| 13   | cycles        | clock cycles per frame / 256   |          | read only: the last finished frame (54 MHz: 0x1240 ≈ 23 ms) |
 
 The camera orbits `target` at distance `dist`: yaw 0 looks along −z. The sun
 is a directional light. Auto-motion adds the speed registers once per
-rendered frame (the display runs at 60 Hz, and rendering keeps up with it).
+rendered frame. The display always runs at 60 Hz; the tracer finishes a
+320×240 frame in roughly 20–35 ms depending on the view and the scene
+register (`R 13` shows it), and a 640×480 quality frame in about four times
+as long. A finished frame is shown at the next vertical blank, so the picture
+never tears.
 
 ## Bring-up hints
 

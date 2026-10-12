@@ -21,13 +21,14 @@ module sdram_model (
 );
     localparam T_RCD = 15000, T_RP = 15000, T_RFC = 60000, T_RAS = 42000, T_REFI = 15625000;
 
-    reg [31:0] mem [0:(1 << 19) - 1];   // bank 0 only: row(11) x col(8)
+    reg [31:0] mem [0:(1 << 21) - 1];   // bank(2) x row(11) x col(8)
     reg [31:0] dq_val = 0;
     reg        dq_en = 0;
     assign dq = dq_en ? dq_val : 32'bz;
 
     reg        row_open = 0;
     reg [10:0] open_row;
+    reg [1:0]  open_bank;
     reg        mode_set = 0;
     realtime   t_act = 0, t_pre = -1.0e9, t_ref = -1.0e9, t_last_ref = 0;
     integer    errors = 0, refreshes = 0, reads = 0, writes = 0;
@@ -38,7 +39,7 @@ module sdram_model (
     reg [31:0] rd0;
 
     integer i;
-    initial for (i = 0; i < (1 << 19); i = i + 1) mem[i] = 32'h0;
+    initial for (i = 0; i < (1 << 21); i = i + 1) mem[i] = 32'h0;
 
     task fail(input [8*80-1:0] msg);
         begin
@@ -60,14 +61,14 @@ module sdram_model (
                     if (row_open) fail("ACTIVATE with a row already open");
                     if ($realtime - t_pre < T_RP) fail("tRP violated");
                     if ($realtime - t_ref < T_RFC) fail("tRFC violated");
-                    if (ba != 0) fail("unexpected bank");
-                    row_open = 1; open_row = addr; t_act = $realtime;
+                    row_open = 1; open_row = addr; open_bank = ba; t_act = $realtime;
                 end
                 3'b101: begin // READ
                     if (!row_open) fail("READ with no open row");
                     if ($realtime - t_act < T_RCD) fail("tRCD violated (read)");
                     if (addr[10]) fail("unexpected auto-precharge");
-                    rv0 <= 1; rd0 <= mem[{open_row, addr[7:0]}];
+                    if (ba != open_bank) fail("READ to a bank without the open row");
+                    rv0 <= 1; rd0 <= mem[{open_bank, open_row, addr[7:0]}];
                     reads = reads + 1;
                 end
                 3'b100: begin // WRITE
@@ -75,11 +76,13 @@ module sdram_model (
                     if ($realtime - t_act < T_RCD) fail("tRCD violated (write)");
                     if (dqm != 0) fail("unexpected DQM");
                     if (^dq === 1'bx || dq_en) fail("WRITE data undefined or bus conflict");
-                    mem[{open_row, addr[7:0]}] = dq;
+                    if (ba != open_bank) fail("WRITE to a bank without the open row");
+                    mem[{open_bank, open_row, addr[7:0]}] = dq;
                     writes = writes + 1;
                 end
                 3'b010: begin // PRECHARGE
                     if (row_open && $realtime - t_act < T_RAS) fail("tRAS violated");
+                    if (row_open && !addr[10] && ba != open_bank) fail("PRECHARGE of the wrong bank");
                     row_open = 0; t_pre = $realtime;
                 end
                 3'b001: begin // AUTO REFRESH

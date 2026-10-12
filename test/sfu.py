@@ -35,7 +35,8 @@ async def rsqrt_matches_model(dut):
             await FallingEdge(clk)
         y1 = int(s.o.y1.value())
         e = int(s.o.e.value())
-        assert (y1, e) == hw.rsqrt(x, fin), f"x={x} fin={fin}: rtl {(y1, e)} model {hw.rsqrt(x, fin)}"
+        m = int(s.o.m.value())
+        assert (y1, e, m) == hw.rsqrt_m(x, fin), f"x={x} fin={fin}: rtl {(y1, e, m)} model {hw.rsqrt_m(x, fin)}"
         exact = 1.0 / math.sqrt(max(x, 1) / 2.0 ** fin)
         rel = abs(y1 / 65536.0 * 2.0 ** (-e / 2) / exact - 1)
         worst = max(worst, rel)

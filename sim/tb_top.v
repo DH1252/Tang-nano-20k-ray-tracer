@@ -1,11 +1,13 @@
 // Full-system testbench: the real Spade `top` with simulation models for the
 // clocks, the DVI receiver and the SDRAM. It drives a scripted UART session
 // and the DVI model writes every displayed frame to sim_out/frame_NNN.ppm;
-// sim/check.py compares them with the bit-exact Python model.
+// sim/check.py finds the expected images (bit-exact Python model) among them.
 //
-//   frame 1  first frame, rendered with defaults + one auto-motion step
-//   frame 4  after W commands (yaw, pitch, sun) and the keys `d` and `l`
-//   frame 7  after the key `t` (test pattern)
+//   1. the first frame: defaults plus one auto-motion step
+//   2. after W commands (camera, sun, animation time, reflective floor) and
+//      the keys `d` and `l`
+//   3. the same view in the 640x480 quality mode
+//   4. the quality-mode test pattern (key `t`)
 `timescale 1ps/1ps
 module tb;
     reg clk27 = 0;  // unused by the simulated clock block
@@ -94,19 +96,25 @@ module tb;
 
     initial begin
         #2000000;
-        send("W 01 0004\r");          // freeze after the first frame
+        send("W 01 0004\r");          // freeze after the first frame, no motion
         send("R 00\r");
-        wait_frames(2);               // frame_001 written
+        wait_frames(4);               // first frame (~23 ms to render) shown
         send("W 02 3000\r");          // yaw
         send("W 03 0400\r");          // pitch
         send("W 0A 7000\r");          // sun azimuth
         send("W 0B 1800\r");          // sun elevation
-        send("W 01 0000\r");          // run, no auto motion
+        send("W 10 2000\r");          // animation time
+        send("W 12 0065\r");          // 1 bounce, floor kr 1/4, 6 spheres
         send("dl");                   // yaw + 0x200, sun azimuth + 0x400
+        send("W 01 0000\r");          // run, no auto motion
         send("R 02\r");
-        wait_frames(5);               // frame_004 written
+        wait_frames(9);               // a frame with all of the above (~33 ms each)
+        send("R 13\r");               // cycles per frame / 256
+        send("W 12 0061\r");          // floor back to matt
+        send("W 01 0020\r");          // 640x480 quality mode
+        wait_frames(20);              // one quality frame (~95 ms) shown
         send("t");                    // test pattern
-        wait_frames(8);               // frame_007 written
+        wait_frames(24);
         $display("tb: sdram reads=%0d writes=%0d refreshes=%0d errors=%0d",
                  sdram.reads, sdram.writes, sdram.refreshes, sdram.errors);
         $display("tb: leds=%b", led);

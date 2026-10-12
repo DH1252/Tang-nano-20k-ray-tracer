@@ -4,23 +4,31 @@ A real-time ray tracer in FPGA logic for the Sipeed Tang Nano 20K (Gowin
 GW2AR-18), written in [Spade](https://spade-lang.org). The plan and its
 LUT/DSP/BRAM budget are in [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** the display, memory and control path is built and verified in
-simulation. It has not been tested on a board yet.
+**Status:** milestones M0–M5 are built and verified in simulation, bit for bit
+against the Python model. Nothing has run on a board yet.
 
-- 640×480@60 DVI out of the HDMI connector.
-- A double-buffered 320×240 RGB565 framebuffer in the chip's embedded SDRAM.
-  Buffers swap during vertical blanking, so there is no tearing.
-- An orbit camera and a sun that move on their own or under control from the
-  USB UART ([protocol](docs/uart-protocol.md)) and the two buttons.
-- A first per-pixel ray renderer: sky, sun and a checkerboard floor with a sun
-  glint. Spheres, shadows and reflections (plan milestones M2–M4) are next.
+- A Whitted ray tracer in logic: six animated spheres (a mirror, glossy and
+  matt ones) over a checkerboard floor, a sun with hard shadows, Lambert and
+  ambient light, Phong highlights, reflections with up to three bounces, a
+  sky gradient with sun glow, and distance fog.
+- Scanline-batched passes over one shared intersection unit and one shading
+  unit ([plan](docs/PLAN.md) §4.2): about 40 fps at 320×240 for the default
+  scene at a 54 MHz core clock.
+- A 640×480 quality mode (key `v` or button S2), at about a quarter of the
+  frame rate.
+- 640×480@60 DVI out of the HDMI connector, from a double-buffered RGB565
+  framebuffer in the chip's embedded SDRAM. Buffers swap during vertical
+  blanking, so there is no tearing.
+- An orbit camera, a moving sun and moving spheres, controlled from the USB
+  UART ([protocol](docs/uart-protocol.md)) and the two buttons.
 
 Frames from the full-system simulation, captured at the HDMI encoder and
-identical to the Python model. Left: the first frame. Right: after
-`W 02 3000`, `W 03 0400`, `W 0A 7000`, `W 0B 1800` and the keys `d` `l` over
-the UART:
+identical to the Python model. Left: the first frame. Right: after UART
+commands that move the camera and sun, advance the animation and make the
+floor reflective. Below: the same view in the 640×480 quality mode.
 
-<img src="docs/img/sim_frame_1.png" width="49%"> <img src="docs/img/sim_frame_4.png" width="49%">
+<img src="docs/img/sim_frame_1.png" width="49%"> <img src="docs/img/sim_frame_2.png" width="49%">
+<img src="docs/img/sim_frame_3.png" width="98%">
 
 ## Build and program
 
@@ -57,7 +65,7 @@ Notes on the Gowin flow:
   settings, taken from SUG1220-2.1E.
   - Synthesis: `-opt_goal timing`, `-map_option 3` and `-netlist_hierarchy 0`
     (flatten). `-map_option 4` and a lower `-max_fanout` buy more speed for
-    more LUTs; the design needs 54 MHz and has a large margin.
+    more LUTs, if the timing report shows the 54 MHz core clock needs it.
   - Place and route: timing-driven, `-place_option 2`, `-route_option 1`,
     resource replication, `-retiming_resource all`, clocks routed fastest
     first, hold fixing, and I/O registers in the IOBs.
@@ -94,11 +102,18 @@ Notes on the Gowin flow:
   tables) and 2 `pROM` (pow and sun tables).
 
 `scripts/build_oss.sh` is the open-source alternative (Yosys, nextpnr-himbaechel,
-apicula). It produced the only full build so far:
+apicula); it has not been run on the tracer.
 
-| LUT4 | Flip-flops | Block RAM | 18×18 multipliers | PLLs | fmax core / pixel (needed) |
-|------|-----------|-----------|-------------------|------|----------------------------|
-| 6,100 / 20,736 (29 %) | 3,725 / 15,552 | 10 / 46 | 29 / 48 (+7 9×9) | 2 / 2 | 146.6 / 85.8 MHz (54 / 25.2) |
+Resources from a GowinSynthesis run of this version (V1.9.11.03, synthesis
+only, before place and route, so fmax is an estimate):
+
+| Logic (LUT + ALU) | Registers | Block RAM | 18×18 multipliers | PLLs | core fmax estimate (needed) |
+|-------------------|-----------|-----------|-------------------|------|-----------------------------|
+| 10,821 / 20,736 (52 %) | 5,060 / 15,552 | 30 / 46 | ≈ 43.5 / 48 | 2 / 2 | 77.6 MHz (54) |
+
+The multiplier count adds up 17 MULT18X18, 11 MULTADDALU18X18 and 2
+MULTALU36X18 (two multipliers each), and 1 MULT9X9. The colour products are
+built from logic to leave the DSPs to the vector maths.
 
 ## Control it
 
@@ -111,6 +126,10 @@ Open the board's serial port at 115200 baud and press keys:
 - `i` / `k`: raise or lower the sun
 - `o`: camera auto-orbit on/off
 - `p`: sun motion on/off
+- `m`: sphere motion on/off
+- `v`: 640×480 quality mode on/off
+- `b`: reflection bounces (0–3)
+- `r`: floor reflectivity (0, ¼, ½, ¾)
 - `t`: test pattern
 - `c`: reset to defaults
 
@@ -120,8 +139,11 @@ The host tool takes values in real units:
 pip install pyserial
 tools/rtctl.py /dev/ttyUSB1 dump
 tools/rtctl.py /dev/ttyUSB1 set yaw 45 dist 4.5 fov 70 sun_el 20 orbit off
+tools/rtctl.py /dev/ttyUSB1 get cycles          # frame time and fps
 tools/rtctl.py /dev/ttyUSB1 keys
 ```
+
+Buttons: **S1** pauses or resumes all motion, **S2** switches the quality mode.
 
 LEDs, from `led[0]`:
 - `led[0]` frame heartbeat
@@ -134,17 +156,20 @@ LEDs, from `led[0]`:
 ## Test
 
 ```
-swim test        # cocotb unit tests: rsqrt unit, camera setup, UART + command parser
+swim test        # cocotb unit tests against model/hw.py: rsqrt unit, camera setup, animator,
+                 # ray unit, shading unit, UART + command parser
 sim/run.sh       # full system in Verilator: SDRAM and DVI models, scripted UART session,
-                 # 3 frames compared bit for bit with model/hw.py (needs Verilator 5)
+                 # 4 frames (320x240 and 640x480) compared bit for bit with model/hw.py
+                 # (needs Verilator 5, about 3 minutes)
 PLAIN=1 sim/run.sh   # the same on the identifier-rewritten Verilog that Gowin EDA builds
 sim/check_clocks.sh  # PLLs, dividers and HDMI serialisers with Gowin's primitive models
                      # (needs GOWIN_HOME)
 ```
 
-`model/hw.py` is a bit-exact Python model of the RTL arithmetic. The tests
-compare against it, and the system simulation also checks the SDRAM protocol,
-SDRAM timing and TMDS symbols.
+`model/hw.py` is a bit-exact Python model of the RTL arithmetic: each pipeline
+has a reference function, and the frame renderer is built from them. The
+tests compare against it, and the system simulation also checks the SDRAM
+protocol, SDRAM timing and TMDS symbols.
 
 ## Layout
 

@@ -1,8 +1,8 @@
 // Controller for the GW2AR-18's embedded 64 Mbit SDR SDRAM (2M x 32:
 // 4 banks x 2048 rows x 256 columns).
 //
-// It moves whole 160-word rows (one 320-pixel RGB565 scanline per SDRAM row)
-// between the SDRAM and on-chip line buffers. Bursts use burst length 1 with
+// It moves 160-word row segments (320 RGB565 pixels: a scanline at 320x240,
+// half a scanline at 640x480) between the SDRAM and on-chip line buffers. Bursts use burst length 1 with
 // a READ or WRITE command on every cycle, so the column address simply counts.
 //
 // Timing is chosen for clocks up to 100 MHz (CL = 2):
@@ -29,6 +29,7 @@ pub struct Pins {
 
 pub struct Request {
     write: bool,
+    bank: uint<2>,
     row: uint<11>,
 }
 
@@ -89,7 +90,7 @@ pub entity sdram_ctrl(
     dq_in: uint<32>,
     rd_lat: uint<3>,
 ) -> SdramOut {
-    decl state, ref_count, ready;
+    decl state, ref_count, ready, bank;
 
     let ref_due = ref_count >= ref_interval();
 
@@ -171,7 +172,13 @@ pub entity sdram_ctrl(
     reg(clk) ready reset(rst: false) = ready || did_refresh;
 
     // Registered outputs.
+    // Bank of the transfer in progress: taken with the request (ACTIVATE),
+    // kept for its READ/WRITE and PRECHARGE commands.
+    let req_bank = match req { Some(r) => r.bank, None => 0 };
+    let ba_next: uint<2> = if accept { req_bank } else { bank };
+    reg(clk) bank: uint<2> reset(rst: 0) = ba_next;
     reg(clk) cmd_r: uint<4> reset(rst: 0b1111) = cmd;
+    reg(clk) ba_r: uint<2> reset(rst: 0) = ba_next;
     reg(clk) addr_r: uint<11> reset(rst: 0) = addr;
     reg(clk) dq_r: Option<uint<32>> reset(rst: None) = if drive { Some(wdata) } else { None };
 
@@ -198,7 +205,7 @@ pub entity sdram_ctrl(
             ras_n: cmd_bits[2],
             cas_n: cmd_bits[1],
             we_n: cmd_bits[0],
-            ba: 0,
+            ba: ba_r,
             addr: addr_r,
             dqm: 0,
             cke: true,

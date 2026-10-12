@@ -13,6 +13,9 @@ use lib::tables::rsqrt_rom;
 pub struct Rsqrt {
     y1: uint<17>,
     e: int<8>,
+    // The normalised mantissa (u2.16, in [1, 4)): x * 2^-fin = m * 2^-16 * 2^e.
+    // sqrt(x * 2^-fin) = (m * y1) * 2^-32 * 2^(e/2).
+    m: uint<18>,
 }
 
 struct Norm {
@@ -80,5 +83,5 @@ pub pipeline(5) rsqrt(clk: clock, x: uint<40>, fin: uint<6>) -> Rsqrt {
         let y1_full: uint<36> = y0 * f;
         let y1: uint<17> = trunc(y1_full >> 17);
     reg;
-        Rsqrt$(y1: y1, e: n.e)
+        Rsqrt$(y1: y1, e: n.e, m: n.m)
 }

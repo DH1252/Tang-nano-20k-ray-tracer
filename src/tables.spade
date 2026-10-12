@@ -367,3 +367,33 @@ pub entity sun_rom(clk: clock, idx: uint<10>) -> uint<8> {
     );
     inst std::mem::read_memory(mem, idx)
 }
+
+// Scene constants (see SPHERES in scripts/gen_tables.py).
+pub struct SphStatic {
+    cx: int<18>,
+    cz: int<18>,
+    orbit: int<18>,
+    r: int<18>,
+    h: int<18>,
+    kd: int<4>,
+    kb: int<4>,
+    od: uint<16>,
+    ob: uint<16>,
+    r2: int<32>,
+    invr: int<18>,
+    alb: [uint<8>; 3],
+    kr: uint<2>,
+    spec: bool,
+}
+
+pub fn sphere_static(i: uint<3>) -> SphStatic {
+    match i {
+        0 => SphStatic$(cx: 0, cz: 0, orbit: 0, r: 4096, h: 0, kd: 0, kb: 0, od: 0, ob: 0, r2: 16777216, invr: 16384, alb: [200, 200, 210], kr: 3, spec: true),
+        1 => SphStatic$(cx: 0, cz: 0, orbit: 9011, r: 2458, h: 2048, kd: 1, kb: 3, od: 0, ob: 0, r2: 6041764, invr: 27302, alb: [220, 40, 40], kr: 0, spec: true),
+        2 => SphStatic$(cx: 0, cz: 0, orbit: 9011, r: 2048, h: 3686, kd: 1, kb: 4, od: 21845, ob: 8192, r2: 4194304, invr: 32768, alb: [40, 80, 230], kr: 1, spec: true),
+        3 => SphStatic$(cx: 0, cz: 0, orbit: 9011, r: 1434, h: 4915, kd: 1, kb: 2, od: 43690, ob: 24576, r2: 2056356, invr: 46798, alb: [240, 180, 40], kr: 2, spec: true),
+        4 => SphStatic$(cx: 0, cz: 0, orbit: 15565, r: 3277, h: 1229, kd: -1, kb: 1, od: 8192, ob: 4096, r2: 10738729, invr: 20479, alb: [50, 200, 80], kr: 0, spec: true),
+        5 => SphStatic$(cx: 0, cz: 0, orbit: 15565, r: 3686, h: 1638, kd: -1, kb: 2, od: 40960, ob: 28672, r2: 13586596, invr: 18206, alb: [150, 60, 200], kr: 1, spec: true),
+        _ => SphStatic$(cx: 0, cz: 0, orbit: 0, r: 0, h: 0, kd: 0, kb: 0, od: 0, ob: 0, r2: 0, invr: 0, alb: [0, 0, 0], kr: 0, spec: false),
+    }
+}

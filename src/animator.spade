@@ -1,0 +1,102 @@
+// Per-frame sphere motion. Each sphere orbits (cx, cz) at radius R and
+// bounces: with angles  td = anim * kd + od  and  tb = anim * kb + ob,
+//
+//   C = (cx + R cos td,  r + h |sin tb|,  cz + R sin td)        s5.12
+//
+// The 18 components are computed in a stream through one sine table and one
+// multiplier, a few dozen cycles per frame. model/hw.py animate is the
+// reference; the constants are in tables.spade (scripts/gen_tables.py).
+
+use lib::fx::sat18;
+use lib::fx::smul18;
+use lib::tables::sin_rom;
+use lib::tables::sphere_static;
+
+pub struct AnimOut {
+    c: [[int<18>; 3]; 6],
+    // Pulses for one cycle when `c` is valid; `c` holds until the next start.
+    done: bool,
+}
+
+// anim * k (mod 2^16) for the small speed multipliers the scene uses.
+fn mulk(a: uint<16>, k: int<4>) -> uint<16> {
+    let a2 = a << 1u16;
+    if k == 1 { a }
+    else if k == 2 { a2 }
+    else if k == 3 { a +. a2 }
+    else if k == 4 { a << 2u16 }
+    else if k == -1 { 0u16 -. a }
+    else if k == -2 { 0u16 -. a2 }
+    else { 0 }
+}
+
+fn upd(old: int<18>, hit: bool, v: int<18>) -> int<18> { if hit { v } else { old } }
+
+pub entity animator(clk: clock, rst: bool, start: bool, anim: uint<16>) -> AnimOut {
+    decl step, c;
+
+    // Step (sphere, component), one per cycle.
+    reg(clk) step: Option<(uint<3>, uint<2>)> reset(rst: None) = if start {
+        Some((0u3, 0u2))
+    } else {
+        match step {
+            Some((i, j)) => if j == 2 {
+                if i == 5 { None } else { Some((trunc(i + 1), 0u2)) }
+            } else {
+                Some((i, trunc(j + 1)))
+            },
+            None => None,
+        }
+    };
+
+    // A: angle -> quarter-wave sine table index (mirror in odd quadrants).
+    let (ia, ja) = match step { Some(s) => s, None => (0u3, 0u2) };
+    let sa = sphere_static(ia);
+    let td = mulk(anim, sa.kd) +. sa.od;
+    let tb = mulk(anim, sa.kb) +. sa.ob;
+    let ang: uint<16> = if ja == 1 { tb } else if ja == 0 { td +. 0x4000 } else { td };
+    let tidx: uint<12> = trunc(ang >> 4);
+    let quad: uint<2> = trunc(tidx >> 10);
+    let jq: uint<10> = trunc(tidx);
+    let j11: uint<11> = zext(jq);
+    let qidx: uint<11> = if quad.as_bits()[0] { 1024u11 -. j11 } else { j11 };
+    reg(clk) mag = inst sin_rom(clk, qidx);
+    reg(clk) neg = quad.as_bits()[1];
+    reg(clk) step_b = step;
+
+    // B: signed sine (|sin| for the bounce) times the amplitude.
+    let (ib, jb) = match step_b { Some(s) => s, None => (0u3, 0u2) };
+    let sb = sphere_static(ib);
+    let mag18: int<18> = zext(mag).as_int();
+    let sinv: int<18> = if jb != 1 && neg { 0 -. mag18 } else { mag18 };
+    let amp: int<18> = if jb == 1 { sb.h } else { sb.orbit };
+    reg(clk) prod: int<36> = smul18(amp, sinv);
+    reg(clk) step_c = step_b;
+
+    // C: add the base and store.
+    let (ic, jc) = match step_c { Some(s) => s, None => (0u3, 0u2) };
+    let sc = sphere_static(ic);
+    let base: int<18> = if jc == 0 { sc.cx } else if jc == 1 { sc.r } else { sc.cz };
+    let v = sat18(sext(base) +. sext(prod >>> 16));
+    let wr = step_c.is_some();
+    let w0 = wr && ic == 0;
+    let w1 = wr && ic == 1;
+    let w2 = wr && ic == 2;
+    let w3 = wr && ic == 3;
+    let w4 = wr && ic == 4;
+    let w5 = wr && ic == 5;
+    let x = jc == 0;
+    let y = jc == 1;
+    let z = jc == 2;
+    reg(clk) c: [[int<18>; 3]; 6] reset(rst: [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]) = [
+        [upd(c[0][0], w0 && x, v), upd(c[0][1], w0 && y, v), upd(c[0][2], w0 && z, v)],
+        [upd(c[1][0], w1 && x, v), upd(c[1][1], w1 && y, v), upd(c[1][2], w1 && z, v)],
+        [upd(c[2][0], w2 && x, v), upd(c[2][1], w2 && y, v), upd(c[2][2], w2 && z, v)],
+        [upd(c[3][0], w3 && x, v), upd(c[3][1], w3 && y, v), upd(c[3][2], w3 && z, v)],
+        [upd(c[4][0], w4 && x, v), upd(c[4][1], w4 && y, v), upd(c[4][2], w4 && z, v)],
+        [upd(c[5][0], w5 && x, v), upd(c[5][1], w5 && y, v), upd(c[5][2], w5 && z, v)],
+    ];
+    reg(clk) done reset(rst: false) = wr && ic == 5 && jc == 2;
+
+    AnimOut$(c: c, done: done)
+}

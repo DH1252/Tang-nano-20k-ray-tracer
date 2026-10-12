@@ -1,0 +1,407 @@
+// Whitted ray tracer: scanline-batched passes over one shared ray unit and
+// one shading unit (docs/PLAN.md §4.2).
+//
+// A batch is 320 pixels: one line at 320x240, half a line in the 640x480
+// quality mode. Its passes run back to back, each streaming one ray per clock
+// and draining before the next starts:
+//
+//   GEN     primary rays -> ray RAM (O = eye, D), hit RAM reset
+//   ISECT   closest hit: for each object (spheres, then the floor) for each
+//           ray, keep the nearest t in the hit RAM
+//   SPAWN   P = O + t D written back over O; lit hit points join the
+//           shadow list
+//   SHADOW  any hit against the spheres, for the shadow list
+//   SHADE   colour into the pixel accumulators; reflective hits write
+//           reflection rays densely to the front of the ray RAM
+//   ...     ISECT..SHADE again for the reflection rays, up to `depth` bounces
+//   WRITE   accumulators -> dither -> RGB565 -> render line buffer
+//
+// Object-major sweeps keep each object's parameters fixed for a whole sweep;
+// a ray's hit entry is read and written back at the ray unit's output, and
+// the same ray comes round again only after the whole list (at least 4
+// slots), so there are no hazards. Reflection rays are written at indices no
+// larger than the ray being read, so the list is compacted in place.
+
+use lib::camera::CamOut;
+use lib::animator::animator;
+use lib::fx::sat18;
+use lib::fx::bayer4;
+use lib::fx::add_sat8;
+use lib::fx::pack565;
+use lib::fx::test_pattern;
+use lib::ray_unit::RuIn;
+use lib::ray_unit::RuOut;
+use lib::ray_unit::ray_unit;
+use lib::shade_unit::SuIn;
+use lib::shade_unit::SuOut;
+use lib::shade_unit::shade_unit;
+use lib::tables::sphere_static;
+
+pub struct Scene {
+    // Spheres in use (0..6).
+    nsph: uint<3>,
+    // Reflection bounces (0..3).
+    depth: uint<2>,
+    // Floor reflectivity in quarters.
+    floor_kr: uint<2>,
+}
+
+pub struct RenderOut {
+    // Pulses when a frame starts: advances auto motion (params change next cycle).
+    frame_tick: bool,
+    // Starts the camera setup and the animator (the cycle after frame_tick).
+    cam_start: bool,
+    // Tells the framebuffer a new back-buffer frame is being drawn.
+    frame_begin: bool,
+    // The frame being drawn is 640x480.
+    quality: bool,
+    // Write into the render line buffer: (address {slot, column}, two pixels).
+    buf_write: Option<(uint<9>, uint<32>)>,
+    // A slot holds a finished batch: (slot, y, half).
+    line_done: Option<(uint<1>, uint<9>, uint<1>)>,
+    // Clock cycles the last frame took.
+    cycles: uint<24>,
+}
+
+struct HitE {
+    t: int<18>,
+    id: uint<3>,
+}
+
+struct AuxE {
+    pix: uint<9>,
+    tp: uint<9>,
+}
+
+enum Fs {
+    Idle,
+    Tick,
+    Setup,
+    Batch,
+}
+
+enum Bs {
+    WaitSlot,
+    Issue,
+    Drain,
+}
+
+// Front-end request travelling with the RAM reads.
+struct Req {
+    pass: uint<3>,
+    j: uint<9>,
+    obj: uint<3>,
+    valid: bool,
+}
+
+fn p_gen() -> uint<3> { 0 }
+fn p_isect() -> uint<3> { 1 }
+fn p_spawn() -> uint<3> { 2 }
+fn p_shadow() -> uint<3> { 3 }
+fn p_shade() -> uint<3> { 4 }
+fn p_write() -> uint<3> { 5 }
+
+fn floor_id() -> uint<3> { 6 }
+fn none_id() -> uint<3> { 7 }
+fn drain_cycles() -> uint<6> { 30 }
+
+fn add3(a: [int<28>; 3], b: [int<28>; 3]) -> [int<28>; 3] {
+    [a[0] +. b[0], a[1] +. b[1], a[2] +. b[2]]
+}
+
+fn q18(v: int<28>) -> int<18> { sat18(sext(v >>> 8)) }
+
+fn max4(n: uint<9>) -> uint<9> { if n < 4 { 4 } else { n } }
+
+fn wr<T>(en: bool, a: uint<9>, d: T) -> Option<(uint<9>, T)> { if en { Some((a, d)) } else { None } }
+
+entity ram<T>(clk: clock, w: Option<(uint<9>, T)>, raddr: uint<9>, zero: T) -> T {
+    let port = match w {
+        Some((a, d)) => (true, a, d),
+        None => (false, 0u9, zero),
+    };
+    let mem: Memory<T, 512> = inst std::mem::clocked_memory(clk, [port]);
+    reg(clk) out = inst std::mem::read_memory(mem, raddr);
+    out
+}
+
+pub entity tracer(
+    clk: clock,
+    rst: bool,
+    may_start: bool,
+    freeze: bool,
+    test_pattern_on: bool,
+    quality_req: bool,
+    scene_req: Scene,
+    anim: uint<16>,
+    cam: CamOut,
+    cam_done: bool,
+    slot_free: [bool; 2],
+) -> RenderOut {
+    decl fs, bs, pass, j, obj, drain, depth, n, ns, nk, y, half, slot, row, d;
+    decl quality, tp_mode, scene, cam_ok, anim_ok, cycles, cyc;
+    decl ru_out, su_out;
+
+    // ------------------------------------------------------------- frame
+    let start = match fs { Fs::Idle => may_start && !freeze, _ => false };
+    let in_tick = match fs { Fs::Tick => true, _ => false };
+    let in_setup = match fs { Fs::Setup => true, _ => false };
+    let an = inst animator(clk, rst, in_tick, anim);
+    reg(clk) cam_ok reset(rst: false) = if in_tick { false } else if cam_done { true } else { cam_ok };
+    reg(clk) anim_ok reset(rst: false) = if in_tick { false } else if an.done { true } else { anim_ok };
+    let setup_done = in_setup && cam_ok && anim_ok;
+    reg(clk) quality reset(rst: false) = if in_tick { quality_req } else { quality };
+    reg(clk) tp_mode reset(rst: false) = if in_tick { test_pattern_on } else { tp_mode };
+    reg(clk) scene reset(rst: Scene$(nsph: 6, depth: 1, floor_kr: 0)) = if in_tick { scene_req } else { scene };
+
+    // Quality mode: half the pixel steps, ray of pixel (0, 0) a quarter step in.
+    let du: [int<28>; 3] = if quality { [cam.du[0] >>> 1, cam.du[1] >>> 1, cam.du[2] >>> 1] } else { cam.du };
+    let dv: [int<28>; 3] = if quality { [cam.dv[0] >>> 1, cam.dv[1] >>> 1, cam.dv[2] >>> 1] } else { cam.dv };
+    let d0: [int<28>; 3] = if quality {
+        [cam.d0[0] -. (cam.du[0] >>> 2) -. (cam.dv[0] >>> 2),
+         cam.d0[1] -. (cam.du[1] >>> 2) -. (cam.dv[1] >>> 2),
+         cam.d0[2] -. (cam.du[2] >>> 2) -. (cam.dv[2] >>> 2)]
+    } else {
+        cam.d0
+    };
+    let eye = cam.eye;
+    let light = cam.light;
+    let lines_m1: uint<9> = if quality { 479 } else { 239 };
+
+    // ------------------------------------------------------------ passes
+    let issuing = match bs { Bs::Issue => true, _ => false } && match fs { Fs::Batch => true, _ => false };
+    let draining = match bs { Bs::Drain => true, _ => false } && match fs { Fs::Batch => true, _ => false };
+    let waiting = match bs { Bs::WaitSlot => true, _ => false } && match fs { Fs::Batch => true, _ => false };
+    let real_len: uint<9> = if pass == p_gen() || pass == p_write() { 320 }
+        else if pass == p_shadow() { ns }
+        else { n };
+    let len: uint<9> = if pass == p_isect() || pass == p_shadow() { max4(real_len) } else { real_len };
+    let last_j = j == len -. 1;
+    let first_obj: uint<3> = if pass == p_isect() && scene.nsph == 0 { floor_id() } else { 0 };
+    let last_obj = if pass == p_isect() { obj == floor_id() }
+        else if pass == p_shadow() { trunc(obj + 1) == scene.nsph }
+        else { true };
+    let next_obj: uint<3> = if pass == p_isect() && trunc(obj + 1) == scene.nsph { floor_id() } else { trunc(obj + 1) };
+    let issue_end = issuing && last_j && last_obj;
+    let drain_end = draining && drain == drain_cycles();
+    let batch_start = waiting && slot_free[slot];
+    let first_pass = if tp_mode { p_write() } else { p_gen() };
+
+    // The pass after this one, decided once it has drained.
+    let isect_first: uint<3> = if scene.nsph == 0 { floor_id() } else { 0 };
+    let (np, nobj, ndepth, nn, batch_end): (uint<3>, uint<3>, uint<2>, uint<9>, bool) =
+        if pass == p_gen() { (p_isect(), isect_first, 0, 320, false) }
+        else if pass == p_isect() { (p_spawn(), 0, depth, n, false) }
+        else if pass == p_spawn() {
+            if ns != 0 && scene.nsph != 0 { (p_shadow(), 0, depth, n, false) } else { (p_shade(), 0, depth, n, false) }
+        }
+        else if pass == p_shadow() { (p_shade(), 0, depth, n, false) }
+        else if pass == p_shade() {
+            if nk != 0 { (p_isect(), isect_first, trunc(depth + 1), nk, false) } else { (p_write(), 0, depth, n, false) }
+        }
+        else { (p_write(), 0, depth, n, true) };
+
+    reg(clk) fs reset(rst: Fs::Idle) = match fs {
+        Fs::Idle => if start { Fs::Tick } else { Fs::Idle },
+        Fs::Tick => Fs::Setup,
+        Fs::Setup => if setup_done { Fs::Batch } else { Fs::Setup },
+        Fs::Batch => if drain_end && batch_end && (!quality || half == 1) && y == lines_m1 { Fs::Idle } else { Fs::Batch },
+    };
+    reg(clk) bs reset(rst: Bs::WaitSlot) = if setup_done { Bs::WaitSlot }
+        else if batch_start { Bs::Issue }
+        else if issue_end { Bs::Drain }
+        else if drain_end { if batch_end { Bs::WaitSlot } else { Bs::Issue } }
+        else { bs };
+    reg(clk) pass: uint<3> reset(rst: 0) = if batch_start { first_pass } else if drain_end { np } else { pass };
+    reg(clk) obj: uint<3> reset(rst: 0) = if batch_start { 0 }
+        else if drain_end { nobj }
+        else if issuing && last_j && !last_obj { next_obj }
+        else { obj };
+    reg(clk) j: uint<9> reset(rst: 0) = if issuing { if last_j { 0 } else { trunc(j + 1) } } else { 0 };
+    reg(clk) drain: uint<6> reset(rst: 0) = if draining { trunc(drain + 1) } else { 0 };
+    reg(clk) depth: uint<2> reset(rst: 0) = if batch_start { 0 } else if drain_end { ndepth } else { depth };
+    reg(clk) n: uint<9> reset(rst: 0) = if drain_end { nn } else { n };
+
+    // Lines and halves.
+    let next_half = quality && half == 0;
+    reg(clk) y: uint<9> reset(rst: 0) = if setup_done { 0 }
+        else if drain_end && batch_end && !next_half { trunc(y + 1) }
+        else { y };
+    reg(clk) half: uint<1> reset(rst: 0) = if setup_done { 0 }
+        else if drain_end && batch_end { if next_half { 1 } else { 0 } }
+        else { half };
+    reg(clk) slot: uint<1> reset(rst: 0) = if setup_done { 0 } else if drain_end && batch_end { ~slot } else { slot };
+
+    // Ray generator accumulators: d steps by du per pixel, row by dv per line.
+    let gen_issue = issuing && pass == p_gen();
+    reg(clk) row: [int<28>; 3] reset(rst: [0, 0, 0]) = if setup_done { d0 }
+        else if drain_end && batch_end && !next_half { add3(row, dv) }
+        else { row };
+    reg(clk) d: [int<28>; 3] reset(rst: [0, 0, 0]) = if batch_start && half == 0 { row }
+        else if gen_issue { add3(d, du) }
+        else { d };
+
+    // --------------------------------------------------------- front end
+    // F0: the request; F1: ray-indexed RAM reads; F2: accumulator read; F3: data.
+    let req = Req$(pass: pass, j: j, obj: obj, valid: issuing && j < real_len);
+    reg(clk) f1: Req reset(rst: Req$(pass: 0, j: 0, obj: 0, valid: false)) = req;
+    reg(clk) f2: Req reset(rst: Req$(pass: 0, j: 0, obj: 0, valid: false)) = f1;
+    reg(clk) f3: Req reset(rst: Req$(pass: 0, j: 0, obj: 0, valid: false)) = f2;
+
+    // Write ports, from the unit outputs (passes never overlap).
+    let ru_gen = match ru_out { Some(o) => o.mode == 0, None => false };
+    let ru_shadow = match ru_out { Some(o) => o.mode == 2 && o.hit, None => false };
+    let ru_idx = match ru_out { Some(o) => o.idx, None => 0 };
+    let ru_dn = match ru_out { Some(o) => o.dn, None => [0, 0, 0] };
+    let su = match su_out {
+        Some(o) => o,
+        None => SuOut$(shade: false, idx: 0, pix: 0, p: [0, 0, 0], r: [0, 0, 0], hit: false,
+                       spawn_shadow: false, refl: false, tp_next: 0, acc: [0, 0, 0]),
+    };
+    let su_valid = su_out.is_some();
+    let su_spawn_p = su_valid && !su.shade && su.hit;
+    let su_spawn_s = su_valid && su.spawn_shadow;
+    let su_acc = su_valid && su.shade;
+    let su_refl = su_valid && su.refl;
+
+    // Closest-hit update: read the entry at the ray unit's output, compare
+    // and write it one cycle later.
+    let ru_isect = match ru_out { Some(o) => o.mode == 1, None => false };
+    reg(clk) cand: Option<RuOut> reset(rst: None) = if ru_isect { ru_out } else { None };
+
+    let idx1: uint<9> = f1.j;
+    let list_idx = inst ram(clk, wr(su_spawn_s, ns, su.idx), j, 0u9);
+    let idx_f1: uint<9> = if f1.pass == p_shadow() { list_idx } else { idx1 };
+
+    let hit_raddr: uint<9> = if pass == p_isect() { ru_idx } else { idx_f1 };
+    let hit_init = HitE$(t: 131071, id: none_id());
+    let cand_t = match cand { Some(c) => c.t, None => 0 };
+    let cand_hit = match cand { Some(c) => c.hit, None => false };
+    let cand_idx = match cand { Some(c) => c.idx, None => 0 };
+    let cand_obj = match cand { Some(c) => c.obj, None => 0 };
+    decl hit_rd;
+    let better = cand_hit && cand_t < hit_rd.t;
+    let hit_w = if ru_gen { Some((ru_idx, hit_init)) }
+        else if better { Some((cand_idx, HitE$(t: cand_t, id: cand_obj))) }
+        else if su_refl { Some((nk, hit_init)) }
+        else { None };
+    let hit_rd = inst ram(clk, hit_w, hit_raddr, hit_init);
+
+    let o_w = if ru_gen { Some((ru_idx, eye)) }
+        else if su_spawn_p { Some((su.idx, su.p)) }
+        else if su_refl { Some((nk, su.p)) }
+        else { None };
+    let o_rd = inst ram(clk, o_w, idx_f1, [0i18, 0, 0]);
+    let d_w = if ru_gen { Some((ru_idx, ru_dn)) } else if su_refl { Some((nk, su.r)) } else { None };
+    let d_rd = inst ram(clk, d_w, idx_f1, [0i18, 0, 0]);
+    let aux_w = if ru_gen { Some((ru_idx, AuxE$(pix: ru_idx, tp: 256))) }
+        else if su_refl { Some((nk, AuxE$(pix: su.pix, tp: su.tp_next))) }
+        else { None };
+    let aux_rd = inst ram(clk, aux_w, idx_f1, AuxE$(pix: 0, tp: 0));
+    let sh_w = if ru_shadow { Some((ru_idx, true)) } else if su_spawn_s { Some((su.idx, false)) } else { None };
+    let sh_rd = inst ram(clk, sh_w, idx_f1, false);
+    let acc_raddr: uint<9> = if pass == p_write() { j } else { aux_rd.pix };
+    let acc_rd = inst ram(clk, wr(su_acc, su.pix, su.acc), acc_raddr, [0u8, 0, 0]);
+
+    // F2 -> F3: hold the ray data one more cycle so it lines up with the
+    // accumulator read.
+    reg(clk) idx2: uint<9> = idx_f1;
+    reg(clk) idx3: uint<9> = idx2;
+    reg(clk) o3 = o_rd;
+    reg(clk) d3 = d_rd;
+    reg(clk) hit3 = hit_rd;
+    reg(clk) aux3 = aux_rd;
+    reg(clk) sh3 = sh_rd;
+
+    // --------------------------------------------------------- the units
+    let cobj: uint<3> = if f3.obj < 6 { f3.obj } else { 0 };
+    let sobj = sphere_static(cobj);
+    let cen = an.c;
+    let ru_in = if gen_issue {
+        Some(RuIn$(mode: 0, idx: j, o: eye, d: [q18(d[0]), q18(d[1]), q18(d[2])], c: [0, 0, 0], r2: 0,
+                   floor: false, obj: 0))
+    } else if f3.valid && (f3.pass == p_isect() || f3.pass == p_shadow()) {
+        let shadow = f3.pass == p_shadow();
+        Some(RuIn$(
+            mode: if shadow { 2 } else { 1 },
+            idx: idx3,
+            o: o3,
+            d: if shadow { light } else { d3 },
+            c: cen[cobj],
+            r2: sobj.r2,
+            floor: f3.obj == floor_id(),
+            obj: f3.obj,
+        ))
+    } else {
+        None
+    };
+    let ru_out = inst(14) ray_unit(clk, ru_in);
+
+    let hid = hit3.id;
+    let hobj: uint<3> = if hid < 6 { hid } else { 0 };
+    let hs = sphere_static(hobj);
+    let is_floor = hid == floor_id();
+    let su_in = if f3.valid && (f3.pass == p_spawn() || f3.pass == p_shade()) {
+        Some(SuIn$(
+            shade: f3.pass == p_shade(),
+            idx: idx3,
+            pix: aux3.pix,
+            tp: aux3.tp,
+            o: o3,
+            d: d3,
+            t: hit3.t,
+            id: hid,
+            shadow: sh3,
+            acc: acc_rd,
+            first: depth == 0,
+            may_refl: depth < scene.depth,
+            c: cen[hobj],
+            invr: hs.invr,
+            alb: hs.alb,
+            kr: if is_floor { scene.floor_kr } else { hs.kr },
+            spec: is_floor || hs.spec,
+        ))
+    } else {
+        None
+    };
+    let su_out = inst(22) shade_unit(clk, su_in, light);
+
+    reg(clk) ns: uint<9> reset(rst: 0) = if drain_end && np == p_spawn() { 0 } else if su_spawn_s { trunc(ns + 1) } else { ns };
+    reg(clk) nk: uint<9> reset(rst: 0) = if drain_end && np == p_shade() { 0 } else if su_refl { trunc(nk + 1) } else { nk };
+
+    // ------------------------------------------------------------- write
+    // F1: accumulator j -> dither -> RGB565; pixels pair into 32-bit words.
+    let w1 = f1.valid && f1.pass == p_write();
+    let xj: uint<10> = zext(f1.j);
+    let xg: uint<10> = if half == 1 { xj +. 320 } else { xj };
+    let xl: uint<9> = f1.j;
+    let dth = bayer4(xl, y);
+    let d_rb: uint<8> = zext(dth >> 1);
+    let d_g: uint<8> = zext(dth >> 2);
+    let tp_x: uint<9> = if quality { trunc(xg >> 1) } else { xl };
+    let tp_y: uint<9> = if quality { y >> 1 } else { y };
+    let rgb: uint<16> = if tp_mode {
+        test_pattern(tp_x, tp_y)
+    } else {
+        pack565(add_sat8(acc_rd[0], d_rb), add_sat8(acc_rd[1], d_g), add_sat8(acc_rd[2], d_rb))
+    };
+    reg(clk) even_px: uint<16> reset(rst: 0) = if w1 && !xl.as_bits()[0] { rgb } else { even_px };
+    let col: uint<8> = trunc(xl >> 1);
+    let buf_write = if w1 && xl.as_bits()[0] { Some((slot.concat(col), rgb.concat(even_px))) } else { None };
+    reg(clk) line_done reset(rst: None) = if w1 && xl == 319 { Some((slot, y, half)) } else { None };
+
+    // ------------------------------------------------------------ stats
+    reg(clk) cyc: uint<24> reset(rst: 0) = if in_tick { 0 } else if cyc == 0xffffff { cyc } else { trunc(cyc + 1) };
+    let frame_end = match fs { Fs::Batch => drain_end && batch_end && (!quality || half == 1) && y == lines_m1, _ => false };
+    reg(clk) cycles: uint<24> reset(rst: 0) = if frame_end { cyc } else { cycles };
+
+    RenderOut$(
+        frame_tick: start,
+        cam_start: in_tick,
+        frame_begin: in_tick,
+        quality: quality,
+        buf_write: buf_write,
+        line_done: line_done,
+        cycles: cycles,
+    )
+}

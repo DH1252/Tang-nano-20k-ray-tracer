@@ -4,24 +4,38 @@ Target: Sipeed Tang Nano 20K (Gowin GW2AR-LV18QN88C8/I7).
 
 ## Status
 
-Built and verified in simulation, not yet tested on a board:
+Milestones M0–M5 are built and verified in simulation, bit for bit against the
+Python model (`model/hw.py`). Nothing has run on a board yet.
 
-- **M1:** 640×480@60 DVI out of the HDMI connector, with clocks, scanout and UART.
-- **M5, brought forward:** a double-buffered 320×240 RGB565 framebuffer in the
-  embedded SDRAM, with buffer swaps during vertical blanking (no tearing). It
-  replaces the block-RAM framebuffer planned for the MVP, so the 38 block RAMs
-  that framebuffer would have used stay free from the start.
-- **Camera and sun motion:** an orbit camera and a sun, set by a microcoded
-  per-frame setup unit on one shared multiplier. Both can move on their own.
-- **UART control:** register read/write commands plus single-key nudges
-  ([uart-protocol.md](uart-protocol.md)) and a host tool (`tools/rtctl.py`).
-- **First renderer:** a per-pixel ray pipeline (ray generator plus two rsqrt
-  units) drawing sky, sun and a checkerboard floor with a sun glint. It
-  exercises the camera, light and framebuffer path ahead of the sphere
-  intersection unit (M2).
+- **M0:** `model/hw.py` is the bit-exact model. Each pipeline has a reference
+  function (`ray_unit_ref`, `shade_unit_ref`, `animate`, `rsqrt_m`, `camera`),
+  and the frame renderer is assembled from them.
+- **M1:** 640×480@60 DVI out of the HDMI connector, with clocks, scanout and
+  UART control ([uart-protocol.md](uart-protocol.md), `tools/rtctl.py`).
+- **M2–M4:** the tracer in `src/tracer.spade` runs the scanline-batched passes
+  of §4.2 (GEN, ISECT, SPAWN, SHADOW, SHADE per bounce, then WRITE) over one
+  ray unit (`ray_unit.spade`: ray generation and sphere/floor tests on one
+  rsqrt SFU) and one shading unit (`shade_unit.spade`).
+  - Six spheres move on sine paths (`animator.spade`) over a checkerboard
+    floor.
+  - Lighting: a sun with hard shadows, Lambert plus ambient, Phong highlights
+    from the pow table, and a sky gradient with sun glow and disc.
+  - Fog with distance, and reflections with kr in quarters, up to three
+    bounces.
+  - About 40 fps at 320×240 for the default scene at 54 MHz (register 0x13
+    reports the frame time).
+- **M5:** a double-buffered RGB565 framebuffer in the embedded SDRAM, with no
+  tearing. A 640×480 quality mode (key `v`, button S2) stores each line's
+  halves in two banks; each frame's resolution travels with its buffer to
+  scanout.
 
 The RTL is in Spade rather than Verilog (§6). The sections below are the
-original plan; M2–M4 (spheres, shadows, reflections) come next.
+original plan. Where the build differs from it:
+- The number formats of §4.3 are the same.
+- Shadow and reflection rays need no `N/128` origin offset: the near root
+  with t > ε already ignores the surface a ray starts on.
+- Colour products are shift-and-add logic, so the DSPs are left for the
+  vector maths.
 
 ## 1. Goal
 
@@ -372,8 +386,9 @@ The RTL is written in [Spade](https://spade-lang.org) (v0.20, pinned in
 `swim.toml`). Vendor primitives sit in thin Verilog wrappers.
 
 ```
-src/*.spade              RTL: top (main), video, uart, control, camera, sfu,
-                         sdram, framebuffer, render, tables (generated), harness
+src/*.spade              RTL: top (main), video, uart, control, camera, animator,
+                         sfu, ray_unit, shade_unit, tracer, fx (helpers), sdram,
+                         framebuffer, tables (generated), harness
 rtl/dq_capture.v         SDRAM read capture on the falling edge
 rtl/gowin/*.v            rPLL/CLKDIV clocks, OSER10 + TLVDS DVI PHY, ODDR SDRAM clock
 constraints/             tangnano20k.cst (pins), tangnano20k.sdc (timing)
@@ -417,12 +432,12 @@ docs/                    this plan, UART protocol, images
 
 | M  | Deliverable                                                          | Exit criteria |
 |----|----------------------------------------------------------------------|---------------|
-| M0 | Bit-exact golden model, test vectors, reference images              | Renders the reference scene; all operands fit 18 bits; ≥ 35 dB against float |
-| M1 | Clocks, 640×480 DVI, 2× scanout, UART (done in simulation; SDRAM framebuffer instead of BSRAM) | Colour bars and a framebuffer pattern on a real monitor; first utilisation entry |
-| M2 | SFU + IU in simulation, then on hardware with primary rays and a flat colour per object | Bit-exact in simulation; sphere silhouettes on screen |
-| M3 | Tier 0: MVP shading, animator, buttons                              | Animated scene at ≥ 25 fps at 54 MHz; ≤ 6.5 K LUTs |
-| M4 | Tier 1: reflections, specular, fog, extra bounces                    | Bit-exact with the model; ≥ 25 fps. **Demo complete.** |
-| M5 | SDRAM framebuffer, double-buffered RGB565 (done in simulation, ahead of M2) | No tearing; 38 BSRAMs freed; 640×480 quality mode works |
+| M0 | Bit-exact golden model, test vectors, reference images (**done**)   | Renders the reference scene; all operands fit 18 bits; ≥ 35 dB against float |
+| M1 | Clocks, 640×480 DVI, 2× scanout, UART (**done in simulation**; SDRAM framebuffer instead of BSRAM) | Colour bars and a framebuffer pattern on a real monitor; first utilisation entry |
+| M2 | SFU + IU in simulation, then on hardware with primary rays and a flat colour per object (**done in simulation**) | Bit-exact in simulation; sphere silhouettes on screen |
+| M3 | Tier 0: MVP shading, animator, buttons (**done in simulation**)     | Animated scene at ≥ 25 fps at 54 MHz; ≤ 6.5 K LUTs |
+| M4 | Tier 1: reflections, specular, fog, extra bounces (**done in simulation**) | Bit-exact with the model; ≥ 25 fps. **Demo complete.** |
+| M5 | SDRAM framebuffer, double-buffered RGB565, 640×480 quality mode (**done in simulation**) | No tearing; 38 BSRAMs freed; 640×480 quality mode works |
 | M6 | Tier 2: soft CPU with UART console, AA, textures, second light       | ≤ 75 % of LUTs; timing met |
 | M7 | Tier 3 stretch items, as the budget allows                           | Each item lands with its own utilisation entry |
 

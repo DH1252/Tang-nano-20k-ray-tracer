@@ -62,6 +62,15 @@ def fov_dec(v):
     return math.degrees(2 * math.atan(v / 32768))
 
 
+def scene_dec(v):
+    return f"0x{v:04x} (bounces={v & 3} floor_kr={(v >> 2) & 3}/4 spheres={min(6, (v >> 4) & 7)})"
+
+
+def cycles_dec(v):
+    ms = v * 256 / 54e3
+    return f"{v * 256} cycles = {ms:.1f} ms = {1000 / ms:.1f} fps at 54 MHz" if v else "no frame yet"
+
+
 # name: (address, encode, decode, unit)
 REGS = {
     "id": (0x00, None, lambda v: f"0x{v:04x}", ""),
@@ -80,8 +89,13 @@ REGS = {
     "sdram_rd_lat": (0x0D, lambda s: int(s, 0), int, "cycles"),
     "frames": (0x0E, None, int, ""),
     "status": (0x0F, None, lambda v: f"sdram_ready={v & 1} front_buffer={(v >> 1) & 1}", ""),
+    "anim": (0x10, lambda s: int(s, 0) & 0xFFFF, lambda v: f"0x{v:04x}", ""),
+    "anim_speed": (0x11, lambda s: int(s, 0) & 0xFFFF, lambda v: f"0x{v:04x}", "per frame"),
+    "scene": (0x12, lambda s: int(s, 0), scene_dec, ""),
+    "cycles": (0x13, None, cycles_dec, ""),
 }
-FLAGS = {"orbit": 0x1, "sun_motion": 0x2, "freeze": 0x4, "test_pattern": 0x8}
+FLAGS = {"orbit": 0x1, "sun_motion": 0x2, "freeze": 0x4, "test_pattern": 0x8, "sphere_motion": 0x10,
+         "quality": 0x20}
 
 
 class Board:
@@ -162,7 +176,8 @@ def cmd_keys(b, _args):
 
 
 __doc_keys__ = """keys: a/d yaw  w/s pitch  z/x distance  j/l sun azimuth  i/k sun elevation
-      o orbit on/off  p sun motion on/off  f freeze  t test pattern  c defaults
+      o orbit on/off  p sun motion on/off  m sphere motion on/off  v 640x480 quality mode
+      b reflection bounces  r floor reflectivity  f freeze  t test pattern  c defaults
       q or Esc quits"""
 
 COMMANDS = {"dump": cmd_dump, "get": cmd_get, "set": cmd_set, "raw": cmd_raw, "keys": cmd_keys}

@@ -29,6 +29,13 @@ def clamp(v, lo, hi):
 # ----------------------------------------------------------------- sfu.spade
 def rsqrt(x, fin):
     """Returns (y1, e): rsqrt(x * 2^-fin) ~= y1 * 2^-16 * 2^(-e/2)."""
+    y1, e, _ = rsqrt_m(x, fin)
+    return y1, e
+
+
+def rsqrt_m(x, fin):
+    """rsqrt plus the normalised mantissa m (u2.16, in [1, 4)) it was taken
+    of: x * 2^-fin = m * 2^-16 * 2^e."""
     x = x & ((1 << 40) - 1)
     if x == 0:
         x = 1
@@ -44,7 +51,7 @@ def rsqrt(x, fin):
     t &= (1 << 18) - 1
     f = 196608 - t
     y1 = (y0 * f) >> 17
-    return y1 & ((1 << 17) - 1), e
+    return y1 & ((1 << 17) - 1), e, m
 
 
 # -------------------------------------------------------------- camera.spade
@@ -101,7 +108,9 @@ def camera(p):
                 light=[n18(r[26]), n18(r[6]), n18(r[27])])
 
 
-# -------------------------------------------------------------- render.spade
+
+
+# ------------------------------------------------------------- common helpers
 def sat18(v):
     return clamp(v, -131071, 131071)
 
@@ -128,80 +137,226 @@ BAYER4 = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
 
 
 def dot_index(v):
+    """Table index for a s1.16 dot product in [0.75, 1)."""
     return clamp((v - 49152) >> 4, 0, 1023)
 
 
-def shade_pixel(d, eye, light, tp, x, y):
-    """RGB565 of one pixel, exactly as render.spade `shade` computes it."""
-    dx, dy, dz = (sat18(v >> 8) for v in d)
-    dd = dx * dx + dy * dy + dz * dz
-    dl = sat18((dx * light[0] + dy * light[1] + dz * light[2]) >> 16)
-    ny = -dy if dy < 0 else 1
-    rs_y1, rs_e = rsqrt(dd, 32)
-    rc_y1, rc_e = rsqrt(ny, 16)
-    # F
-    half_e = (-rs_e) >> 1
-    rsn = (rs_y1 << half_e) if half_e >= 0 else (rs_y1 >> -half_e)
-    rsn &= (1 << 20) - 1
-    rsn = min(rsn, 131071)   # saturated to 18 bits in the RTL
-    dy_n = sat18(wrap((dy * rsn) >> 16, 40))
-    dl_n = sat18(wrap((dl * rsn) >> 16, 40))
-    r16s = ((rc_y1 * rc_y1) >> 16) & ((1 << 17) - 1)
-    ey = eye[1]
-    w0 = wrap((ey * r16s) >> 16, 40)
-    wshift = wrap(-rc_e, 8)
-    # G
-    if 0 <= wshift < 20:
-        w_big = wrap(w0 << wshift, 40)
+def shift_signed(v, s):
+    """Unsigned v shifted left by s (s >= 0) or right by -s."""
+    return v << s if s >= 0 else v >> -s
+
+
+# ------------------------------------------------------------ animator.spade
+SPHERES = gen_tables.SPHERES
+NSPH = len(SPHERES)
+FLOOR, NONE = 6, 7
+TMAX, EPS = 131071, 16
+
+
+sphere_static = gen_tables.sphere_static
+
+
+def sin16(ang):
+    return SIN[(ang & 0xFFFF) >> 4]
+
+
+def animate(anim):
+    """Sphere centres (s5.12) for animation time `anim`, exactly as
+    animator.spade computes them."""
+    out = []
+    for i in range(NSPH):
+        s = sphere_static(i)
+        td = (anim * s["kd"] + s["od"]) & 0xFFFF
+        tb = (anim * s["kb"] + s["ob"]) & 0xFFFF
+        x = s["cx"] + ((s["R"] * sin16(td + 0x4000)) >> 16)
+        y = s["r"] + ((s["h"] * abs(sin16(tb))) >> 16)
+        z = s["cz"] + ((s["R"] * sin16(td)) >> 16)
+        out.append([sat18(x), sat18(y), sat18(z)])
+    return out
+
+
+# ------------------------------------------------------------ ray_unit.spade
+def ray_unit_ref(mode, o, d, c=(0, 0, 0), r2=0, floor=False):
+    """Bit-exact ray_unit output fields (t, hit, dn) for one input.
+    mode 0 = GEN (d is the quantised direction), 1 = closest, 2 = any hit."""
+    gen = mode == 0
+    lw = [c[k] - o[k] for k in range(3)]
+    ovf = any(abs(v) > 131071 for v in lw)
+    l = [sat18(v) for v in lw]
+    s = list(d) if gen else l
+    b = sat18((l[0] * d[0] + l[1] * d[1] + l[2] * d[2]) >> 16)
+    ll = s[0] * s[0] + s[1] * s[1] + s[2] * s[2]
+    disc = b * b - (ll - r2)
+    if gen:
+        x, fin = ll, 32
+    elif floor:
+        x, fin = (-d[1] if d[1] < 0 else 1), 16
     else:
-        w_big = 0x1FFFF
-    w = 0x1FFFF if w_big > 0x1FFFF else 0 if w_big < 0 else w_big
-    hit = dy < 0 and ey > 0 and w < 0x1E000
-    rl = sat18(dl_n - wrap((dy_n * light[1]) >> 15, 40))
-    # H
-    px = wrap(eye[0] + wrap((w * dx) >> 16, 24), 24)
-    pz = wrap(eye[2] + wrap((w * dz) >> 16, 24), 24)
-    k8 = clamp8(dy_n >> 8)
-    sun8 = SUN[dot_index(dl_n)]
-    spec8 = POW[dot_index(rl)]
-    disc = dl_n >= 65500
+        x, fin = (disc if disc > 0 else 1), 24
+    y1, e, m = rsqrt_m(x, fin)
+    rsn = shift_signed(y1, (-e) >> 1) & ((1 << 20) - 1)
+    rsn = min(rsn, 131071)
+    dn = [sat18((v * rsn) >> 16) for v in d]
+    prod = (y1 if floor else m) * y1
+    sq = (prod >> 16) & ((1 << 19) - 1)
+    sqrtd = shift_signed(sq, (e >> 1) - 4) & ((1 << 24) - 1)
+    t_sph = b - sqrtd
+    r16 = (prod >> 16) & ((1 << 17) - 1)
+    w0 = (o[1] * r16) >> 16
+    ws = wrap(-e, 8)
+    w_big = wrap(w0 << ws, 40) if 0 <= ws < 20 else 0x1FFFF
+    t_floor = clamp(w_big, 0, 0x1FFFF)
+    t = t_floor if floor else t_sph
+    geom = (d[1] < 0 and o[1] > 0) if floor else (not ovf and disc > 0)
+    hit = geom and 16 < t < 131071 and not gen
+    return dict(t=wrap(t, 18), hit=hit, dn=dn)
+
+
+def gen_ray(d):
+    """Primary ray direction: d (s3.24 accumulators) -> unit D (s1.16)."""
+    return ray_unit_ref(0, (0, 0, 0), [sat18(v >> 8) for v in d])["dn"]
+
+
+def closest_hit(O, D, centres, nsph):
+    best_t, best_id = TMAX, NONE
+    objs = list(range(nsph)) + [FLOOR]
+    for i in objs:
+        if i == FLOOR:
+            r = ray_unit_ref(1, O, D, (0, 0, 0), 0, True)
+        else:
+            r = ray_unit_ref(1, O, D, centres[i], sphere_static(i)["r2"], False)
+        if r["hit"] and r["t"] < best_t:
+            best_t, best_id = r["t"], i
+    return best_t, best_id
+
+
+def any_hit(O, L, centres, nsph):
+    return any(ray_unit_ref(2, O, L, centres[i], sphere_static(i)["r2"], False)["hit"]
+               for i in range(nsph))
+
+
+# ---------------------------------------------------------- shade_unit.spade
+def _sum3(a, b):
+    return sat18((a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) >> 16)
+
+
+def shade_unit_ref(q, light):
+    """Bit-exact shade_unit output for input fields q (see SuIn)."""
+    hit = q["id"] != NONE
+    floor = q["id"] == FLOOR
+    teff = 0 if q["shade"] else q["t"]
+    p = [sat18(q["o"][k] + ((teff * q["d"][k]) >> 16)) for k in range(3)]
+    pc = [sat18(p[k] - q["c"][k]) for k in range(3)]
+    if floor:
+        n = [0, 65536, 0]
+    elif not hit:
+        n = [0, 0, 0]
+    else:
+        n = [sat18((pc[k] * q["invr"]) >> 10) for k in range(3)]
+    nl = _sum3(n, light)
+    dn = _sum3(q["d"], n)
+    r = [sat18(q["d"][k] - ((dn * n[k]) >> 15)) for k in range(3)]
+    rl = _sum3(r, light)
+    shadowed = hit and (nl <= 0 or q["shadow"])
+    tidx = dot_index(rl)
     ly8 = clamp(light[1] >> 8, 0, 256)
-    # I
-    checker = ((px >> 12) ^ (pz >> 12)) & 1
-    wf = (w >> 8) & 0x3FF
-    fade = 0 if wf >= 256 else 256 - wf
-    light_f = 96 + ((ly8 * 160) >> 8)
+    k8 = clamp8(q["d"][1] >> 8)
+    d8 = 0 if shadowed else clamp(nl >> 8, 0, 256)
+    sun_v = 0 if hit else (255 if rl >= 65500 else SUN[tidx])
     skyscale = 150 + ((ly8 * 106) >> 8)
-    albedo = 230 if checker else 40
-    spec_on = spec8 if ly8 > 0 else 0
-    lit = ((albedo * light_f) >> 8) + spec_on
-    floor_lit = min(lit, 255)
-    sky = []
-    for base, slope, sc in ((200, -160, 255), (215, -125, 230), (235, -45, 180)):
-        sun_v = 255 if disc else sun8
-        v = ((base + ((slope * k8) >> 8)) * skyscale >> 8) + ((sun_v * sc) >> 8)
-        sky.append(clamp8(v))
-    # J
-    inv_fade = 256 - fade
-    fog = [((floor_lit * fade + c * inv_fade) >> 8) & 0xFF for c in sky]
-    if tp:
-        return test_pattern(x, y)
-    r, g, b = fog if hit else sky
+    lightf = 96 + ((d8 * 160) >> 8)
+    spec = POW[tidx] if (q["spec"] and not shadowed) else 0
+    if floor:
+        checker = ((p[0] >> 12) ^ (p[2] >> 12)) & 1
+        alb = (230, 230, 230) if checker else (40, 40, 40)
+    else:
+        alb = q["alb"]
+    fade = 256 - (((q["t"] & 0x3FFFF) >> 9) & 0xFF)
+    col = []
+    for k, (base, slope, sc) in enumerate(((200, 160, 255), (215, 125, 230), (235, 45, 180))):
+        g = base + ((-(slope * k8)) >> 8)
+        sky = clamp8(((g * skyscale) >> 8) + ((sun_v * sc) >> 8))
+        lit = min(255, ((alb[k] * lightf) >> 8) + spec)
+        col.append(sky + (((lit - sky) * fade) >> 8) if hit else sky)
+    kr, tp = q["kr"], q["tp"]
+    refl = hit and kr != 0 and q["may_refl"]
+    wk = {1: tp * 3, 2: tp * 2, 3: tp}.get(kr, tp * 4)
+    w = (wk >> 2) if refl else tp
+    tp_next = ({1: tp, 2: tp * 2, 3: tp * 3}.get(kr, 0) >> 2) & 0x1FF
+    acc = [min(255, (0 if q["first"] else q["acc"][k]) + ((col[k] * w) >> 8)) for k in range(3)]
+    return dict(shade=q["shade"], idx=q["idx"], pix=q["pix"], p=p, r=r, hit=hit,
+                spawn_shadow=(not q["shade"]) and hit and nl > 0, refl=q["shade"] and refl,
+                tp_next=tp_next, acc=acc)
+
+
+def su_input(shade, O, D, t, hid, centres, scene, shadow=False, acc=(0, 0, 0), first=True,
+             may_refl=False, tp=256, idx=0, pix=0):
+    """The SuIn fields the tracer builds for a ray (object constants by id)."""
+    s = sphere_static(hid if hid < NSPH else 0)
+    is_floor = hid == FLOOR
+    return dict(shade=shade, idx=idx, pix=pix, tp=tp, o=list(O), d=list(D), t=t, id=hid,
+                shadow=shadow, acc=list(acc), first=first, may_refl=may_refl,
+                c=list(centres[hid if hid < NSPH else 0]), invr=s["invr"], alb=s["alb"],
+                kr=scene["floor_kr"] if is_floor else s["kr"], spec=is_floor or bool(s["spec"]))
+
+
+def trace_pixel(d, eye, light, centres, scene):
+    """Accumulated RGB of one pixel through the same passes as the tracer:
+    GEN, then per bounce ISECT, SPAWN, SHADOW, SHADE."""
+    nsph, maxd = scene["nsph"], scene["depth"]
+    O, D = list(eye), gen_ray(d)
+    tp, acc = 256, [0, 0, 0]
+    for depth in range(maxd + 1):
+        t, hid = closest_hit(O, D, centres, nsph)
+        sp = shade_unit_ref(su_input(False, O, D, t, hid, centres, scene), light)
+        P = sp["p"] if sp["hit"] else O
+        shadow = sp["spawn_shadow"] and nsph > 0 and any_hit(P, light, centres, nsph)
+        sh = shade_unit_ref(su_input(True, P, D, t, hid, centres, scene, shadow, acc, depth == 0,
+                                     depth < maxd, tp), light)
+        acc = sh["acc"]
+        if not sh["refl"]:
+            break
+        O, D, tp = sh["p"], sh["r"], sh["tp_next"]
+    return acc
+
+
+DEFAULT_SCENE = dict(anim=0, nsph=6, depth=1, floor_kr=0)
+
+
+def dither565(acc, x, y):
     dth = BAYER4[y & 3][x & 3]
+    r, g, b = acc
     return pack565(min(255, r + (dth >> 1)), min(255, g + (dth >> 2)), min(255, b + (dth >> 1)))
 
 
-def render_frame(p, tp=False):
-    """320x240 list of rows of RGB565, as the renderer writes them."""
+def frame_setup(p, scene, quality=False):
     c = camera(p)
-    img = []
-    for y in range(240):
-        row = []
-        for x in range(320):
-            d = [wrap(c["d0"][i] + y * c["dv"][i] + x * c["du"][i], 28) for i in range(3)]
-            row.append(shade_pixel(d, c["eye"], c["light"], tp, x, y))
-        img.append(row)
-    return img
+    d0, du, dv = c["d0"], c["du"], c["dv"]
+    if quality:
+        d0 = [d0[i] - (du[i] >> 2) - (dv[i] >> 2) for i in range(3)]
+        du = [v >> 1 for v in du]
+        dv = [v >> 1 for v in dv]
+    return c, d0, du, dv, animate(scene["anim"])
+
+
+def render_line(p, scene, y, quality=False, tp=False, setup=None):
+    c, d0, du, dv, centres = setup or frame_setup(p, scene, quality)
+    w = 640 if quality else 320
+    row = []
+    for x in range(w):
+        if tp:
+            row.append(test_pattern(x >> 1, y >> 1) if quality else test_pattern(x, y))
+            continue
+        d = [wrap(d0[i] + y * dv[i] + x * du[i], 28) for i in range(3)]
+        acc = trace_pixel(d, c["eye"], c["light"], centres, scene)
+        row.append(dither565(acc, x, y))
+    return row
+
+
+def render_frame(p, scene=DEFAULT_SCENE, quality=False, tp=False):
+    """List of rows of RGB565: 240 x 320, or 480 x 640 in quality mode."""
+    setup = frame_setup(p, scene, quality)
+    return [render_line(p, scene, y, quality, tp, setup) for y in range(480 if quality else 240)]
 
 
 def rgb565_to_888(v):

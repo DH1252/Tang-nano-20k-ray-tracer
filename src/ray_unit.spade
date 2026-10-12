@@ -1,0 +1,125 @@
+// Ray unit: ray generation and the intersection tests, on one pipeline with
+// one rsqrt unit. GEN and the intersection passes never run at the same time,
+// so they share the squaring multipliers and the SFU (docs/PLAN.md §4.4).
+//
+//   GEN      D = dq * rsqrt(dq . dq)                       (dq: s1.16, quantised)
+//   sphere   L = C - O, b = L.D, c = L.L - r^2, disc = b^2 - c,
+//            t = b - sqrt(disc)                             (near root)
+//   floor    t = O.y / -D.y                                 (y = 0 plane)
+//
+// The output says whether the object is hit at EPS < t < TMAX; the tracer
+// compares t with the ray's best hit (closest) or just records it (any hit).
+// model/hw.py gen_ray, isect_sphere and isect_floor are the reference.
+
+use lib::fx::sat18;
+use lib::fx::shift_signed;
+use lib::fx::shift_signed24;
+use lib::fx::smul18;
+use lib::sfu::rsqrt;
+
+// mode: 0 = GEN, 1 = closest hit, 2 = any hit (shadow rays)
+pub struct RuIn {
+    mode: uint<2>,
+    idx: uint<9>,
+    o: [int<18>; 3],
+    d: [int<18>; 3],
+    c: [int<18>; 3],
+    r2: int<32>,
+    floor: bool,
+    obj: uint<3>,
+}
+
+pub struct RuOut {
+    mode: uint<2>,
+    idx: uint<9>,
+    obj: uint<3>,
+    t: int<18>,
+    hit: bool,
+    dn: [int<18>; 3],
+}
+
+fn sat19(v: int<19>) -> int<18> {
+    if v > 131071 { 131071 } else if v < -131071 { -131071 } else { trunc(v) }
+}
+
+fn big19(v: int<19>) -> bool { v > 131071 || v < -131071 }
+
+fn umul18x17(a: uint<18>, b: uint<17>) -> uint<35> { a * b }
+
+pub pipeline(14) ray_unit(clk: clock, inp: Option<RuIn>) -> Option<RuOut> {
+        // L = C - O, saturated to +-32 units (beyond that the sphere is missed).
+        let valid = inp.is_some();
+        let q = match inp {
+            Some(q) => q,
+            None => RuIn$(mode: 0, idx: 0, o: [0, 0, 0], d: [0, 0, 0], c: [0, 0, 0], r2: 0, floor: false, obj: 0),
+        };
+        let is_gen = q.mode == 0;
+        let lw0: int<19> = q.c[0] - q.o[0];
+        let lw1: int<19> = q.c[1] - q.o[1];
+        let lw2: int<19> = q.c[2] - q.o[2];
+        let ovf = big19(lw0) || big19(lw1) || big19(lw2);
+        let l = [sat19(lw0), sat19(lw1), sat19(lw2)];
+        // GEN squares the direction instead of L.
+        let s = if is_gen { q.d } else { l };
+    reg;
+        let ld0 = smul18(l[0], q.d[0]);
+        let ld1 = smul18(l[1], q.d[1]);
+        let ld2 = smul18(l[2], q.d[2]);
+        let ss0 = smul18(s[0], s[0]);
+        let ss1 = smul18(s[1], s[1]);
+        let ss2 = smul18(s[2], s[2]);
+    reg;
+        let ld: int<40> = sext(ld0) +. sext(ld1) +. sext(ld2);
+        let b = sat18(ld >>> 16);
+        let ll: int<40> = sext(ss0) +. sext(ss1) +. sext(ss2);
+        let c: int<40> = ll -. sext(q.r2);
+    reg;
+        let bb = smul18(b, b);
+    reg;
+        let disc: int<40> = sext(bb) -. c;
+        let dy_neg: int<40> = 0 -. sext(q.d[1]);
+        let x: int<40> = if is_gen { ll } else if q.floor {
+            if q.d[1] < 0 { dy_neg } else { 1 }
+        } else {
+            if disc > 0 { disc } else { 1 }
+        };
+        let fin: uint<6> = if is_gen { 32 } else if q.floor { 16 } else { 24 };
+    reg;
+        let rs = inst(5) rsqrt(clk, x.as_uint(), fin);
+    reg * 5;
+        // GEN: normalisation factor and D = dq * rsn.
+        let half_e: int<8> = (0 -. rs.e) >>> 1;
+        let rsn: uint<20> = shift_signed(zext(rs.y1), half_e);
+        let rsn_lo: uint<18> = trunc(rsn);
+        let rsn18: int<18> = if rsn > 131071 { 131071 } else { rsn_lo.as_int() };
+        let dn0 = smul18(q.d[0], rsn18);
+        let dn1 = smul18(q.d[1], rsn18);
+        let dn2 = smul18(q.d[2], rsn18);
+        // Sphere: m * y1 is sqrt of the mantissa; floor: y1^2 is 1 / -D.y.
+        let pm: uint<18> = if q.floor { zext(rs.y1) } else { rs.m };
+        let prod = umul18x17(pm, rs.y1);
+    reg;
+        let sq: uint<19> = trunc(prod >> 16);
+        let sqrtd: uint<24> = shift_signed24(sq, (rs.e >>> 1) -. 4);
+        let t_sph: int<26> = sext(b) - zext(sqrtd).as_int();
+        let r16: uint<17> = trunc(prod >> 16);
+        let w_mul = smul18(q.o[1], zext(r16).as_int());
+        let dn = [sat18(sext(dn0 >>> 16)), sat18(sext(dn1 >>> 16)), sat18(sext(dn2 >>> 16))];
+    reg;
+        let w0: int<40> = sext(w_mul >>> 16);
+        let wshift: int<8> = 0 -. rs.e;
+        let ws40: uint<40> = zext(wshift.as_uint());
+        let w_big: int<40> = if wshift >= 0 && wshift < 20 { w0 << ws40.as_int() } else { 0x1ffff };
+        let t_floor: int<26> = if w_big > 0x1ffff { 0x1ffff } else if w_big < 0 { 0 } else { trunc(w_big) };
+        let t: int<26> = if q.floor { t_floor } else { t_sph };
+        let geom = if q.floor { q.d[1] < 0 && q.o[1] > 0 } else { !ovf && disc > 0 };
+    reg;
+        let hit = geom && t > 16 && t < 131071;
+    reg;
+        let t18: int<18> = trunc(t);
+        if valid {
+            Some(RuOut$(mode: q.mode, idx: q.idx, obj: q.obj, t: t18, hit: hit && !is_gen, dn: dn))
+        } else {
+            None
+        }
+}

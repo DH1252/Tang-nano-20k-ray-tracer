@@ -1,0 +1,292 @@
+// Shading unit, one ray per clock, in two modes:
+//
+//   spawn  P = O + t D (written back in place of O); N and N.L decide whether
+//          the hit point needs a shadow ray.
+//   shade  P comes from the ray RAM (t is used only for fog). Lambert +
+//          ambient with the shadow bit, Phong highlight from the pow table
+//          indexed by R.L, checker floor, sky gradient with sun glow and disc
+//          for misses, fog into the sky gradient, and the reflection mix:
+//          the pixel accumulates throughput * (1 - kr/4) of this colour and a
+//          reflection ray R = D - 2 (D.N) N carries throughput * kr/4.
+//
+// model/hw.py shade and trace_pixel are the reference.
+
+use lib::fx::sat18;
+use lib::fx::clamp8;
+use lib::fx::dot_index;
+use lib::fx::smul18;
+use lib::fx::lmul_lo;
+use lib::fx::lmul_hi;
+use lib::tables::pow_rom;
+use lib::tables::sun_rom;
+
+pub struct SuIn {
+    // false: spawn pass, true: shade pass
+    shade: bool,
+    idx: uint<9>,
+    pix: uint<9>,
+    tp: uint<9>,
+    o: [int<18>; 3],
+    d: [int<18>; 3],
+    t: int<18>,
+    id: uint<3>,
+    shadow: bool,
+    acc: [uint<8>; 3],
+    // First bounce: the accumulator starts from zero.
+    first: bool,
+    may_refl: bool,
+    // Object constants for `id` (the floor's kr comes from the scene register).
+    c: [int<18>; 3],
+    invr: int<18>,
+    alb: [uint<8>; 3],
+    kr: uint<2>,
+    spec: bool,
+}
+
+pub struct SuOut {
+    shade: bool,
+    idx: uint<9>,
+    pix: uint<9>,
+    p: [int<18>; 3],
+    r: [int<18>; 3],
+    hit: bool,
+    spawn_shadow: bool,
+    refl: bool,
+    tp_next: uint<9>,
+    acc: [uint<8>; 3],
+}
+
+fn sum3(a: int<36>, b: int<36>, c: int<36>) -> int<18> {
+    let s: int<40> = sext(a) +. sext(b) +. sext(c);
+    sat18(s >>> 16)
+}
+
+// Products with constants, as shifts and adds so they stay out of the DSPs.
+fn x160(v: uint<9>) -> uint<17> { (zext(v) << 7u17) +. (zext(v) << 5u17) }
+fn x106(v: uint<9>) -> uint<17> {
+    (zext(v) << 6u17) +. (zext(v) << 5u17) +. (zext(v) << 3u17) +. (zext(v) << 1u17)
+}
+fn x125(v: uint<8>) -> uint<16> { (zext(v) << 7u16) -. (zext(v) << 1u16) -. zext(v) }
+fn x45(v: uint<8>) -> uint<16> { (zext(v) << 5u16) +. (zext(v) << 3u16) +. (zext(v) << 2u16) +. zext(v) }
+fn x255(v: uint<8>) -> uint<16> { (zext(v) << 8u16) -. zext(v) }
+fn x230(v: uint<8>) -> uint<16> { (zext(v) << 8u16) -. (zext(v) << 4u16) -. (zext(v) << 3u16) -. (zext(v) << 1u16) }
+fn x180(v: uint<8>) -> uint<16> { (zext(v) << 7u16) +. (zext(v) << 5u16) +. (zext(v) << 4u16) +. (zext(v) << 2u16) }
+
+// base + (slope * k8 >> 8) for a negative slope given as its magnitude product.
+fn grad(base: uint<8>, mag: uint<16>) -> uint<8> {
+    let m: int<18> = zext(mag).as_int();
+    let s: int<18> = (0 -. m) >>> 8;
+    let g: int<18> = zext(base).as_int() +. s;
+    trunc(g.as_uint())
+}
+
+// The fog product's sign put back: (lit - sky) * fade from |lit - sky| * fade.
+fn signed_prod(neg: bool, mag: uint<17>) -> int<20> {
+    let pr: int<20> = zext(mag).as_int();
+    if neg { 0 -. pr } else { pr }
+}
+
+// clamp8((g * skyscale >> 8) + sun term)
+fn sky_chan(gs: uint<17>, st: uint<8>) -> uint<8> {
+    let g: uint<10> = trunc(gs >> 8);
+    let v: uint<11> = g + zext(st);
+    let vi: int<20> = zext(v).as_int();
+    clamp8(vi)
+}
+
+// sky + (f >> 8); the result stays between the two colours, so 0..255.
+fn fog_chan(sky: uint<8>, f: int<20>) -> uint<8> {
+    let si: int<20> = zext(sky).as_int();
+    let v: int<20> = si +. (f >>> 8);
+    trunc(v.as_uint())
+}
+
+fn add_min255(a: uint<8>, b: uint<8>) -> uint<8> {
+    let s: uint<9> = a + b;
+    if s > 255 { 255 } else { trunc(s) }
+}
+
+pub pipeline(22) shade_unit(clk: clock, inp: Option<SuIn>, light: [int<18>; 3]) -> Option<SuOut> {
+        let valid = inp.is_some();
+        let q = match inp {
+            Some(q) => q,
+            None => SuIn$(shade: false, idx: 0, pix: 0, tp: 0, o: [0, 0, 0], d: [0, 0, 0], t: 0, id: 7,
+                          shadow: false, acc: [0, 0, 0], first: false, may_refl: false, c: [0, 0, 0],
+                          invr: 0, alb: [0, 0, 0], kr: 0, spec: false),
+        };
+        let hit = q.id != 7;
+        let floor = q.id == 6;
+        let teff: int<18> = if q.shade { 0 } else { q.t };
+    reg;
+        let td0 = smul18(teff, q.d[0]);
+        let td1 = smul18(teff, q.d[1]);
+        let td2 = smul18(teff, q.d[2]);
+    reg;
+        let p0 = sat18(sext(q.o[0]) +. sext(td0 >>> 16));
+        let p1 = sat18(sext(q.o[1]) +. sext(td1 >>> 16));
+        let p2 = sat18(sext(q.o[2]) +. sext(td2 >>> 16));
+        let p = [p0, p1, p2];
+    reg;
+        let pc0 = sat18(sext(p[0]) -. sext(q.c[0]));
+        let pc1 = sat18(sext(p[1]) -. sext(q.c[1]));
+        let pc2 = sat18(sext(p[2]) -. sext(q.c[2]));
+    reg;
+        let nr0 = smul18(pc0, q.invr);
+        let nr1 = smul18(pc1, q.invr);
+        let nr2 = smul18(pc2, q.invr);
+    reg;
+        let n: [int<18>; 3] = if floor {
+            [0, 65536, 0]
+        } else if !hit {
+            [0, 0, 0]
+        } else {
+            [sat18(sext(nr0 >>> 10)), sat18(sext(nr1 >>> 10)), sat18(sext(nr2 >>> 10))]
+        };
+    reg;
+        let nl0 = smul18(n[0], light[0]);
+        let nl1 = smul18(n[1], light[1]);
+        let nl2 = smul18(n[2], light[2]);
+        let dn0 = smul18(q.d[0], n[0]);
+        let dn1 = smul18(q.d[1], n[1]);
+        let dn2 = smul18(q.d[2], n[2]);
+    reg;
+        let nl = sum3(nl0, nl1, nl2);
+        let dn = sum3(dn0, dn1, dn2);
+    reg;
+        let rn0 = smul18(dn, n[0]);
+        let rn1 = smul18(dn, n[1]);
+        let rn2 = smul18(dn, n[2]);
+    reg;
+        let r = [
+            sat18(sext(q.d[0]) -. sext(rn0 >>> 15)),
+            sat18(sext(q.d[1]) -. sext(rn1 >>> 15)),
+            sat18(sext(q.d[2]) -. sext(rn2 >>> 15)),
+        ];
+    reg;
+        let rl0 = smul18(r[0], light[0]);
+        let rl1 = smul18(r[1], light[1]);
+        let rl2 = smul18(r[2], light[2]);
+    reg;
+        let rl = sum3(rl0, rl1, rl2);
+        let shadowed = hit && (nl <= 0 || q.shadow);
+        let ly_s: int<18> = light[1] >>> 8;
+        let ly8: uint<9> = if ly_s < 0 { 0 } else if ly_s > 256 { 256 } else { trunc(ly_s.as_uint()) };
+        let k8 = clamp8(sext(q.d[1] >>> 8));
+        let nl_s: int<18> = nl >>> 8;
+        let d8: uint<9> = if shadowed { 0 } else if nl_s < 0 { 0 } else if nl_s > 256 { 256 } else { trunc(nl_s.as_uint()) };
+    reg;
+        // Table lookups (registered by the next stage); constant products.
+        let tidx = dot_index(rl);
+        let sun8 = inst sun_rom(clk, tidx);
+        let spec8 = inst pow_rom(clk, tidx);
+        let disc = rl >= 65500;
+        let k9: uint<9> = zext(k8);
+        let p106 = x106(ly8);
+        let p160d = x160(d8);
+        let p160k: uint<16> = trunc(x160(k9));
+        let p125 = x125(k8);
+        let p45 = x45(k8);
+    reg;
+        let sun_v: uint<8> = if hit { 0 } else if disc { 255 } else { sun8 };
+        let skyscale: uint<9> = 150 +. trunc(p106 >> 8);
+        let lightf: uint<9> = 96 +. trunc(p160d >> 8);
+        let g_r = grad(200, p160k);
+        let g_g = grad(215, p125);
+        let g_b = grad(235, p45);
+        let spec: uint<8> = if q.spec && !shadowed { spec8 } else { 0 };
+        // Floor: checker from the integer bits of P.x and P.z.
+        let checker = p[0].as_bits()[12] ^^ p[2].as_bits()[12];
+        let fa: uint<8> = if checker { 230 } else { 40 };
+        let alb: [uint<8>; 3] = if floor { [fa, fa, fa] } else { q.alb };
+        let tq: uint<18> = q.t.as_uint();
+        let wf: uint<8> = trunc(tq >> 9);
+        let fade: uint<9> = 256 -. zext(wf);
+    reg;
+        // Colour products in logic (lmul8x9), in two halves per stage pair.
+        let al_rl = lmul_lo(alb[0], lightf);
+        let al_rh = lmul_hi(alb[0], lightf);
+        let al_gl = lmul_lo(alb[1], lightf);
+        let al_gh = lmul_hi(alb[1], lightf);
+        let al_bl = lmul_lo(alb[2], lightf);
+        let al_bh = lmul_hi(alb[2], lightf);
+        let gs_rl = lmul_lo(g_r, skyscale);
+        let gs_rh = lmul_hi(g_r, skyscale);
+        let gs_gl = lmul_lo(g_g, skyscale);
+        let gs_gh = lmul_hi(g_g, skyscale);
+        let gs_bl = lmul_lo(g_b, skyscale);
+        let gs_bh = lmul_hi(g_b, skyscale);
+        let st_r: uint<8> = trunc(x255(sun_v) >> 8);
+        let st_g: uint<8> = trunc(x230(sun_v) >> 8);
+        let st_b: uint<8> = trunc(x180(sun_v) >> 8);
+    reg;
+        let lit_r = add_min255(trunc((al_rl +. al_rh) >> 8), spec);
+        let lit_g = add_min255(trunc((al_gl +. al_gh) >> 8), spec);
+        let lit_b = add_min255(trunc((al_bl +. al_bh) >> 8), spec);
+        let sky_r = sky_chan(gs_rl +. gs_rh, st_r);
+        let sky_g = sky_chan(gs_gl +. gs_gh, st_g);
+        let sky_b = sky_chan(gs_bl +. gs_bh, st_b);
+    reg;
+        // Fog: sky + (lit - sky) * fade, as |lit - sky| * fade with the sign after.
+        let neg_r = lit_r < sky_r;
+        let neg_g = lit_g < sky_g;
+        let neg_b = lit_b < sky_b;
+        let mag_r: uint<8> = if neg_r { sky_r -. lit_r } else { lit_r -. sky_r };
+        let mag_g: uint<8> = if neg_g { sky_g -. lit_g } else { lit_g -. sky_g };
+        let mag_b: uint<8> = if neg_b { sky_b -. lit_b } else { lit_b -. sky_b };
+    reg;
+        let fm_rl = lmul_lo(mag_r, fade);
+        let fm_rh = lmul_hi(mag_r, fade);
+        let fm_gl = lmul_lo(mag_g, fade);
+        let fm_gh = lmul_hi(mag_g, fade);
+        let fm_bl = lmul_lo(mag_b, fade);
+        let fm_bh = lmul_hi(mag_b, fade);
+    reg;
+        let f_r = signed_prod(neg_r, fm_rl +. fm_rh);
+        let f_g = signed_prod(neg_g, fm_gl +. fm_gh);
+        let f_b = signed_prod(neg_b, fm_bl +. fm_bh);
+    reg;
+        let c_r: uint<8> = if hit { fog_chan(sky_r, f_r) } else { sky_r };
+        let c_g: uint<8> = if hit { fog_chan(sky_g, f_g) } else { sky_g };
+        let c_b: uint<8> = if hit { fog_chan(sky_b, f_b) } else { sky_b };
+        let refl = hit && q.kr != 0 && q.may_refl;
+        let tp2: uint<11> = zext(q.tp) << 1u11;
+        let tp3: uint<11> = zext(q.tp) +. tp2;
+        let tp4: uint<11> = zext(q.tp) << 2u11;
+        let wk: uint<11> = match q.kr { 1 => tp3, 2 => tp2, 3 => zext(q.tp), _ => tp4 };
+        let w: uint<9> = if refl { trunc(wk >> 2) } else { q.tp };
+        let tk: uint<11> = match q.kr { 1 => zext(q.tp), 2 => tp2, 3 => tp3, _ => 0 };
+        let tp_next: uint<9> = trunc(tk >> 2);
+    reg;
+        let ct_rl = lmul_lo(c_r, w);
+        let ct_rh = lmul_hi(c_r, w);
+        let ct_gl = lmul_lo(c_g, w);
+        let ct_gh = lmul_hi(c_g, w);
+        let ct_bl = lmul_lo(c_b, w);
+        let ct_bh = lmul_hi(c_b, w);
+    reg;
+        let a0: uint<8> = if q.first { 0 } else { q.acc[0] };
+        let a1: uint<8> = if q.first { 0 } else { q.acc[1] };
+        let a2: uint<8> = if q.first { 0 } else { q.acc[2] };
+        let acc = [
+            add_min255(a0, trunc((ct_rl +. ct_rh) >> 8)),
+            add_min255(a1, trunc((ct_gl +. ct_gh) >> 8)),
+            add_min255(a2, trunc((ct_bl +. ct_bh) >> 8)),
+        ];
+    reg;
+        if valid {
+            Some(SuOut$(
+                shade: q.shade,
+                idx: q.idx,
+                pix: q.pix,
+                p: p,
+                r: r,
+                hit: hit,
+                spawn_shadow: !q.shade && hit && nl > 0,
+                refl: q.shade && refl,
+                tp_next: tp_next,
+                acc: acc,
+            ))
+        } else {
+            None
+        }
+}

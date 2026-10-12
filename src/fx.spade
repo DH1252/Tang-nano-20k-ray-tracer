@@ -1,0 +1,103 @@
+// Fixed-point helpers shared by the tracer units. model/hw.py mirrors each.
+
+pub fn sat18(v: int<40>) -> int<18> {
+    if v > 131071 { 131071 } else if v < -131071 { -131071 } else { trunc(v) }
+}
+
+pub fn clamp8(v: int<20>) -> uint<8> {
+    if v < 0 { 0 } else if v > 255 { 255 } else { trunc(v.as_uint()) }
+}
+
+// v shifted left by s (s >= 0) or right by -s, for the exponents the rsqrt
+// unit returns.
+pub fn shift_signed(v: uint<18>, s: int<8>) -> uint<20> {
+    let w: uint<20> = zext(v);
+    if s >= 0 { w << zext(s.as_uint()) } else { w >> zext((0 -. s).as_uint()) }
+}
+
+// Same for a 19-bit value and a 24-bit result (square roots).
+pub fn shift_signed24(v: uint<19>, s: int<8>) -> uint<24> {
+    let w: uint<24> = zext(v);
+    if s >= 0 { w << zext(s.as_uint()) } else { w >> zext((0 -. s).as_uint()) }
+}
+
+// Table index for a dot product v (s1.16) in [0.75, 1): (v - 0.75) * 4096.
+pub fn dot_index(v: int<18>) -> uint<10> {
+    let t: int<18> = (v -. 49152) >>> 4;
+    if t < 0 { 0 } else if t > 1023 { 1023 } else { trunc(t.as_uint()) }
+}
+
+pub fn bayer4(x: uint<9>, y: uint<9>) -> uint<4> {
+    let xb: uint<2> = trunc(x);
+    let yb: uint<2> = trunc(y);
+    let row: [uint<4>; 4] = match yb {
+        0 => [0, 8, 2, 10],
+        1 => [12, 4, 14, 6],
+        2 => [3, 11, 1, 9],
+        _ => [15, 7, 13, 5],
+    };
+    row[xb]
+}
+
+pub fn add_sat8(v: uint<8>, a: uint<8>) -> uint<8> {
+    let s: uint<9> = v + a;
+    if s > 255 { 255 } else { trunc(s) }
+}
+
+// Multipliers at their true operand widths. Gowin's synthesis does not narrow
+// sign- or zero-extended operands, so each multiply is written on the
+// smallest types that hold its operands: one 18x18 (vector maths) or a
+// 9x9-class (colour) multiplier each.
+pub fn smul18(a: int<18>, b: int<18>) -> int<36> { a * b }
+pub fn umul9(a: uint<9>, b: uint<9>) -> uint<18> { a * b }
+pub fn smul10(a: int<10>, b: int<10>) -> int<20> { a * b }
+
+// 8 x 9-bit unsigned multiply as shifts and adds in logic. The colour
+// products use it: the DSP blocks are all spoken for by the vector maths,
+// while LUTs are the spare resource (docs/PLAN.md §2, rule 5).
+fn pp(a: uint<17>, bit: bool, s: uint<17>) -> uint<17> { if bit { a << s } else { 0 } }
+
+pub fn lmul8x9(a: uint<8>, b: uint<9>) -> uint<17> { lmul_lo(a, b) +. lmul_hi(a, b) }
+
+// The same split in two, so a pipeline can register the halves before the
+// final add: lmul8x9(a, b) == lmul_lo(a, b) + lmul_hi(a, b).
+pub fn lmul_lo(a: uint<8>, b: uint<9>) -> uint<17> {
+    let w: uint<17> = zext(a);
+    let bb = b.as_bits();
+    ((pp(w, bb[0], 0) +. pp(w, bb[1], 1)) +. (pp(w, bb[2], 2) +. pp(w, bb[3], 3))) +. pp(w, bb[4], 4)
+}
+
+pub fn lmul_hi(a: uint<8>, b: uint<9>) -> uint<17> {
+    let w: uint<17> = zext(a);
+    let bb = b.as_bits();
+    (pp(w, bb[5], 5) +. pp(w, bb[6], 6)) +. (pp(w, bb[7], 7) +. pp(w, bb[8], 8))
+}
+
+pub fn pack565(r: uint<8>, g: uint<8>, b: uint<8>) -> uint<16> {
+    let r5: uint<5> = trunc(r >> 3);
+    let g6: uint<6> = trunc(g >> 2);
+    let b5: uint<5> = trunc(b >> 3);
+    r5.concat(g6).concat(b5)
+}
+
+// Colour bars, a grey ramp and a white border, for framebuffer bring-up.
+pub fn test_pattern(x: uint<9>, y: uint<9>) -> uint<16> {
+    if x == 0 || x == 319 || y == 0 || y == 239 {
+        0xffff
+    } else if y < 160 {
+        let bar: uint<3> = trunc((x * 205u9) >> 13);
+        match bar {
+            0 => 0xffff,
+            1 => 0xffe0,
+            2 => 0x07ff,
+            3 => 0x07e0,
+            4 => 0xf81f,
+            5 => 0xf800,
+            6 => 0x001f,
+            _ => 0x0000,
+        }
+    } else {
+        let level: uint<8> = trunc((x * 205u9) >> 8);
+        pack565(level, level, level)
+    }
+}

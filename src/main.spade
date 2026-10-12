@@ -1,11 +1,12 @@
 // Tang Nano 20K ray tracer: top level.
 //
-// HDMI (DVI 640x480@60) shows a double-buffered 320x240 framebuffer kept in
-// the GW2AR-18's embedded SDRAM. The renderer draws a sky / sun / floor scene
-// whose camera and sun move under UART control (115200 8N1, see
-// docs/uart-protocol.md) or on their own. Clock domains:
+// HDMI (DVI 640x480@60) shows a double-buffered framebuffer (320x240, or
+// 640x480 in quality mode) kept in the GW2AR-18's embedded SDRAM. The ray
+// tracer (tracer.spade) draws animated spheres over a checkerboard floor with
+// shadows and reflections; the camera, sun and spheres move on their own or
+// under UART control (115200 8N1, see docs/uart-protocol.md). Clock domains:
 //   clk_pix  25.2 MHz  video timing, scanout, TMDS encoding
-//   clk_core 54   MHz  renderer, camera setup, SDRAM, UART, control
+//   clk_core 54   MHz  tracer, camera setup, animator, SDRAM, UART, control
 
 mod video;
 mod uart;
@@ -15,7 +16,11 @@ mod camera;
 mod control;
 mod sdram;
 mod framebuffer;
-mod render;
+mod fx;
+mod animator;
+mod ray_unit;
+mod shade_unit;
+mod tracer;
 mod harness;
 
 use lib::sdram::Request;
@@ -107,25 +112,34 @@ entity top(
     let (status, status_inv) = port();
     let press_s1 = inst button(clk_core, rst, btn_s1);
     let press_s2 = inst button(clk_core, rst, btn_s2);
-    let ctl = inst control::control(clk_core, rst, rx_byte, tx_ready, frame_tick, press_s1, press_s2, frames, status);
+    let (cycles, cycles_inv) = port();
+    let ctl = inst control::control(clk_core, rst, rx_byte, tx_ready, frame_tick, press_s1, press_s2, frames, status, cycles);
     let utx = inst uart::uart_tx(clk_core, rst, ctl.tx, clocks_per_bit());
     set tx_ready_inv = utx.ready;
     set uart_tx = utx.tx;
     let p = ctl.params;
 
     // --------------------------------------------- scanout requests (pixel)
+    // The front buffer's resolution, taken once per frame at line 0 (it only
+    // changes when the buffers swap, during vertical blanking).
     let t = inst video::video_timing(clk_pix, rst_pix);
+    let (front_quality, front_quality_inv) = port();
+    let fq_pix = inst std::cdc::sync2_bool(clk_pix, front_quality);
+    reg(clk_pix) qmode reset(rst_pix: false) = if t.x == 0 && t.y == 0 { fq_pix } else { qmode };
+    // 320x240: source line n+1 at even display lines (each line shows twice);
+    // 640x480: line y+1 at every display line y.
     let even_line = !t.y.as_bits()[0];
     let half_y: uint<9> = trunc(t.y >> 1);
-    let want: Option<uint<8>> = if t.x == 0 {
+    let want: Option<uint<9>> = if t.x == 0 {
         if t.y == 524 { Some(0) }
-        else if t.y < 478 && even_line { Some(trunc(half_y + 1)) }
+        else if qmode && t.y < 479 { Some(trunc(t.y + 1)) }
+        else if !qmode && t.y < 478 && even_line { Some(trunc(half_y + 1)) }
         else { None }
     } else {
         None
     };
     reg(clk_pix) req_toggle reset(rst_pix: false) = if want.is_some() { !req_toggle } else { req_toggle };
-    reg(clk_pix) req_line: uint<8> reset(rst_pix: 0) = match want { Some(l) => l, None => req_line };
+    reg(clk_pix) req_line: uint<9> reset(rst_pix: 0) = match want { Some(l) => l, None => req_line };
 
     // The line number is stable for two display lines around each toggle,
     // so it can be sampled once the toggle has been synchronised.
@@ -139,8 +153,10 @@ entity top(
     let (sd_fill, sd_fill_inv) = port();
     let (line_done, line_done_inv) = port();
     let (frame_begin, frame_begin_inv) = port();
+    let (render_quality, render_quality_inv) = port();
     let fb = inst framebuffer::framebuffer(
-        clk_core, rst, scan_req, line_done, frame_begin, sd_accept, sd_write_done, sd_fill);
+        clk_core, rst, scan_req, line_done, frame_begin, render_quality, sd_accept, sd_write_done, sd_fill);
+    set front_quality_inv = fb.front_quality;
 
     let (buf_write, buf_write_inv) = port();
     let (wbuf_addr, wbuf_addr_inv) = port();
@@ -168,25 +184,39 @@ entity top(
     // ------------------------------------------------- camera + renderer
     let (cam_start, cam_start_inv) = port();
     let cam = inst camera::camera_setup(clk_core, rst, cam_start, p.cam);
-    let r = inst render::renderer(
-        clk_core, rst, fb.may_start && sd.ready, p.freeze, p.test_pattern, cam.out, cam.done, fb.slot_free);
+    let r = inst tracer::tracer(
+        clk_core, rst, fb.may_start && sd.ready, p.freeze, p.test_pattern, p.quality, p.scene, p.anim,
+        cam.out, cam.done, fb.slot_free);
     set cam_start_inv = r.cam_start;
     set frame_tick_inv = r.frame_tick;
     set frame_begin_inv = r.frame_begin;
     set buf_write_inv = r.buf_write;
     set line_done_inv = r.line_done;
+    set render_quality_inv = r.quality;
+    set cycles_inv = trunc(r.cycles >> 8);
 
     reg(clk_core) frame_count: uint<16> reset(rst: 0) = if r.frame_begin { frame_count +. 1 } else { frame_count };
     set frames_inv = frame_count;
     set status_inv = (if sd.ready { 1u16 } else { 0u16 }) | (if fb.front { 2u16 } else { 0u16 });
 
     // ---------------------------------------------------- scanout (pixel)
-    let slot: uint<1> = trunc(t.y >> 1);
-    let word: uint<8> = trunc(t.x >> 2);
-    let pair = inst framebuffer::line_ram(clk_core, fb.scan_write, clk_pix, slot.concat(word));
+    // Scanout RAM address {slot, half, word}: 320x240 shows each pixel twice
+    // and each line twice; 640x480 reads both halves of one line.
+    let right = t.x >= 320;
+    let xi: uint<10> = if right { t.x -. 320 } else { t.x };
+    let scan_addr: uint<10> = if qmode {
+        let slot: uint<1> = trunc(t.y);
+        let word: uint<8> = trunc(xi >> 1);
+        slot.concat(if right { 1u1 } else { 0u1 }).concat(word)
+    } else {
+        let slot: uint<1> = trunc(t.y >> 1);
+        let word: uint<8> = trunc(t.x >> 2);
+        slot.concat(0u1).concat(word)
+    };
+    let pair = inst framebuffer::scan_ram(clk_core, fb.scan_write, clk_pix, scan_addr);
     // Delay timing by the one-cycle line RAM read.
     reg(clk_pix) t_d = t;
-    reg(clk_pix) half_d = t.x.as_bits()[1];
+    reg(clk_pix) half_d = if qmode { t.x.as_bits()[0] } else { t.x.as_bits()[1] };
     let px: uint<16> = if half_d { trunc(pair >> 16) } else { trunc(pair) };
     let (red, green, blue) = video::rgb565_to_888(px);
     let ctrl0: uint<2> = (if t_d.vsync { 2u2 } else { 0u2 }) | (if t_d.hsync { 1u2 } else { 0u2 });
