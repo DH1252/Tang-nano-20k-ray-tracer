@@ -6,7 +6,7 @@
 //     sqrt(X)  = X * rsqrt(X)
 //     1/X      = rsqrt(X)^2 = y1^2 * 2^-32 * 2^-e
 // The mantissa m (u2.16, in [1, 4)) indexes a 1024-entry table, then one
-// Newton step brings the result to ~20 bits. Latency: 4 cycles.
+// Newton step brings the result to ~20 bits. Latency: 5 cycles.
 
 use lib::tables::rsqrt_rom;
 
@@ -47,9 +47,9 @@ fn normalise(x: uint<40>) -> (uint<48>, uint<6>) {
     (v6, trunc(msb))
 }
 
-fn norm(x_in: uint<40>, fin: uint<6>) -> Norm {
-    let x = if x_in == 0 { 1u40 } else { x_in };
-    let (v, msb) = normalise(x);
+// Second half of the normalisation: exponent and mantissa from the
+// normalised value and its MSB position.
+fn norm_finish(v: uint<48>, msb: uint<6>, fin: uint<6>) -> Norm {
     let msb_s: int<8> = zext(msb).as_int();
     let fin_s: int<8> = zext(fin).as_int();
     let eraw: int<8> = msb_s -. fin_s;
@@ -60,8 +60,12 @@ fn norm(x_in: uint<40>, fin: uint<6>) -> Norm {
     Norm$(m: m, e: e)
 }
 
-pub pipeline(4) rsqrt(clk: clock, x: uint<40>, fin: uint<6>) -> Rsqrt {
-        let n = norm(x, fin);
+pub pipeline(5) rsqrt(clk: clock, x: uint<40>, fin: uint<6>) -> Rsqrt {
+        // Leading-zero shift in its own stage (it is the longest logic here).
+        let x1 = if x == 0 { 1u40 } else { x };
+        let (v, msb) = normalise(x1);
+    reg;
+        let n = norm_finish(v, msb, fin);
         let idx: uint<10> = trunc(n.m >> 8);
         let y0 = inst rsqrt_rom(clk, idx);
     reg;

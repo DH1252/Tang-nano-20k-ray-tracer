@@ -109,7 +109,7 @@ fn test_pattern(x: uint<9>, y: uint<8>) -> uint<16> {
     }
 }
 
-pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option<Shaded> {
+pub pipeline(17) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option<Shaded> {
         // A: quantise the ray to s1.16, square it, dot it with L.
         let p = match pix { Some(p) => p, None => Pixel$(x: 0, y: 0, slot: 0, d: [0, 0, 0]) };
         let valid = pix.is_some();
@@ -119,6 +119,8 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let dx = sat18(dx40);
         let dy = sat18(dy40);
         let dz = sat18(dz40);
+    reg;
+        // A2: squares and dot products (DSP inputs straight from registers).
         let xx: int<36> = dx * dx;
         let yy: int<36> = dy * dy;
         let zz: int<36> = dz * dz;
@@ -137,20 +139,24 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let dl = sat18((lx40 +. ly40 +. lz40) >>> 16);
         let dy_neg: int<40> = 0 -. sext(dy);
         let ny: int<40> = if dy < 0 { dy_neg } else { 1 };
-        let rs = inst(4) rsqrt(clk, dd.as_uint(), 32);
-        let rc = inst(4) rsqrt(clk, ny.as_uint(), 16);
-    reg * 4;
+    reg;
+        // C: rsqrt units start from registered inputs.
+        let rs = inst(5) rsqrt(clk, dd.as_uint(), 32);
+        let rc = inst(5) rsqrt(clk, ny.as_uint(), 16);
+    reg * 5;
         // F: normalised D.y and D.L; floor distance before exponent shift.
         let half_e: int<8> = (0 -. rs.e) >>> 1;
         let rsn: uint<20> = shift_signed(zext(rs.y1), half_e);
         // ~1.0 in .16 for the ray lengths used here; saturate to fit 18 bits.
         let rsn_lo: uint<18> = trunc(rsn);
         let rsn18: int<18> = if rsn > 131071 { 131071 } else { rsn_lo.as_int() };
-        let dy_n = sat18(sext(smul18(dy, rsn18) >>> 16));
-        let dl_n = sat18(sext(smul18(dl, rsn18) >>> 16));
         let r16: uint<34> = rc.y1 * rc.y1;
         let r16s: uint<17> = trunc(r16 >> 16);
         let r18: int<18> = zext(r16s).as_int();
+    reg;
+        // F2: scale by the normalisation factor.
+        let dy_n = sat18(sext(smul18(dy, rsn18) >>> 16));
+        let dl_n = sat18(sext(smul18(dl, rsn18) >>> 16));
         let ey = k.eye[1];
         let w0: int<40> = sext(smul18(ey, r18) >>> 16);
         let wshift: int<8> = 0 -. rc.e;
@@ -158,6 +164,8 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         // G: floor distance, hit test, mirrored ray . L
         let ws40: uint<40> = zext(wshift.as_uint());
         let w_big: int<40> = if wshift >= 0 && wshift < 20 { w0 << ws40.as_int() } else { 0x1ffff };
+    reg;
+        // G2: saturate the distance, hit test.
         let w: int<18> = if w_big > 0x1ffff { 0x1ffff } else if w_big < 0 { 0 } else { trunc(w_big) };
         let hit = dy < 0 && ey > 0 && w < 0x1e000;
         let dln40: int<40> = sext(dl_n);
@@ -178,7 +186,7 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let ly_s: int<18> = k.light[1] >>> 8;
         let ly8: uint<9> = if ly_s < 0 { 0 } else if ly_s > 256 { 256 } else { trunc(ly_s.as_uint()) };
     reg;
-        // I: lighting, sky gradient (8-bit colour channels; factors <= 256)
+        // I1: lighting factors and sky gradient (8-bit colour, factors <= 256)
         let checker = px.as_bits()[12] ^^ pz.as_bits()[12];
         let wf: uint<10> = trunc(w.as_uint() >> 8);
         let fade: uint<9> = if wf >= 256 { 0 } else { trunc(256u10 -. wf) };
@@ -186,9 +194,6 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let skyscale: uint<9> = 150 +. trunc(umul9(ly8, 106) >> 8);
         let albedo: uint<9> = if checker { 230 } else { 40 };
         let spec_on: uint<9> = if ly8 > 0 { zext(spec8) } else { 0 };
-        let lit_d: uint<9> = trunc(umul9(albedo, light) >> 8);
-        let lit: uint<10> = lit_d + spec_on;
-        let floor_lit: uint<9> = if lit > 255 { 255 } else { trunc(lit) };
         let k8i: int<10> = zext(k8).as_int();
         let ss: int<10> = zext(skyscale).as_int();
         let sun_v: uint<8> = if disc { 255 } else { sun8 };
@@ -196,6 +201,11 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let grad_r: int<10> = 200 +. trunc(smul10(-160, k8i) >>> 8);
         let grad_g: int<10> = 215 +. trunc(smul10(-125, k8i) >>> 8);
         let grad_b: int<10> = 235 +. trunc(smul10(-45, k8i) >>> 8);
+    reg;
+        // I2: the second multiply of each colour product.
+        let lit_d: uint<9> = trunc(umul9(albedo, light) >> 8);
+        let lit: uint<10> = lit_d + spec_on;
+        let floor_lit: uint<9> = if lit > 255 { 255 } else { trunc(lit) };
         let sky_r = clamp8((smul10(grad_r, ss) >>> 8) +. (smul10(sun_i, 255) >>> 8));
         let sky_g = clamp8((smul10(grad_g, ss) >>> 8) +. (smul10(sun_i, 230) >>> 8));
         let sky_b = clamp8((smul10(grad_b, ss) >>> 8) +. (smul10(sun_i, 180) >>> 8));
@@ -206,6 +216,8 @@ pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option
         let fog_r: uint<8> = trunc((fl +. umul9(zext(sky_r), inv_fade)) >> 8);
         let fog_g: uint<8> = trunc((fl +. umul9(zext(sky_g), inv_fade)) >> 8);
         let fog_b: uint<8> = trunc((fl +. umul9(zext(sky_b), inv_fade)) >> 8);
+    reg;
+        // J2: choose, dither, pack.
         let (r, g, b) = if hit { (fog_r, fog_g, fog_b) } else { (sky_r, sky_g, sky_b) };
         let dth = bayer4(p.x, p.y);
         let d_rb: uint<8> = zext(dth >> 1);
@@ -287,7 +299,7 @@ pub entity renderer(
         if line_start { row } else if emit { add3(d, cam.du) } else { d };
 
     let pix = if emit { Some(Pixel$(x: x, y: y, slot: slot, d: d)) } else { None };
-    let shaded = inst(10) shade(clk, pix, consts);
+    let shaded = inst(17) shade(clk, pix, consts);
 
     // Pair pixels into 32-bit words: left (even) pixel in the low half.
     reg(clk) even_px: uint<16> reset(rst: 0) = match shaded {

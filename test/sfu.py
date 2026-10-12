@@ -31,7 +31,7 @@ async def rsqrt_matches_model(dut):
         await FallingEdge(clk)
         s.i.x = str(x)
         s.i.fin = str(fin)
-        for _ in range(4):
+        for _ in range(5):
             await FallingEdge(clk)
         y1 = int(s.o.y1.value())
         e = int(s.o.e.value())

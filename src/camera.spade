@@ -13,8 +13,8 @@
 //   right = ( cos yaw, 0, -sin yaw)
 //   up    = (-sin yaw sin pitch, cos pitch, -cos yaw sin pitch)
 //
-// It runs as a small microprogram on one shared multiplier, two cycles per
-// micro-op, about 80 cycles per frame. Angles are u16 fractions of a turn.
+// It runs as a small microprogram on one shared multiplier, three cycles per
+// micro-op, about 120 cycles per frame. Angles are u16 fractions of a turn.
 
 use lib::tables::sin_rom;
 
@@ -154,6 +154,7 @@ fn narrow(v: int<28>) -> int<18> { trunc(v) }
 enum State {
     Idle,
     Issue{pc: uint<6>},
+    Mul{pc: uint<6>},
     Write{pc: uint<6>},
 }
 
@@ -165,6 +166,7 @@ pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> Cam
     let pc = match state {
         State::Idle => 0u6,
         State::Issue(pc) => pc,
+        State::Mul(pc) => pc,
         State::Write(pc) => pc,
     };
     let u = program(pc);
@@ -187,9 +189,11 @@ pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> Cam
     reg(clk) a_r = a_val;
     reg(clk) b_r = b_val;
 
-    // Write cycle: compute and store.
+    // Mul cycle: registered multiply (operands are stable while pc is).
     let b_mul: int<18> = trunc(b_r);
-    let prod: int<46> = a_r * b_mul;
+    reg(clk) prod: int<46> = a_r * b_mul;
+
+    // Write cycle: shift, negate, store.
     let sh46: uint<46> = zext(u.sh);
     let prod_sh: int<28> = trunc(prod >>> sh46.as_int());
     let mul_res: int<28> = if u.neg { 0 -. prod_sh } else { prod_sh };
@@ -228,7 +232,8 @@ pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> Cam
     let finished = match state { State::Write(_) => u.op == 0, _ => false };
     reg(clk) state reset(rst: State::Idle) = match state {
         State::Idle => if start { State::Issue(0) } else { State::Idle },
-        State::Issue(pc) => State::Write(pc),
+        State::Issue(pc) => State::Mul(pc),
+        State::Mul(pc) => State::Write(pc),
         State::Write(pc) => if u.op == 0 { State::Idle } else { State::Issue(trunc(pc + 1)) },
     };
     reg(clk) done reset(rst: false) = finished;
