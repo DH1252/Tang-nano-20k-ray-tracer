@@ -120,11 +120,20 @@ fn none_id() -> uint<3> { 7 }
 
 // Cycles from a pass's last issue until its results are all written.
 fn drain_of(pass: uint<3>) -> uint<6> {
-    if pass == p_gen() { 14 }
-    else if pass == p_isect() { 41 }
-    else if pass == p_shadow() { 16 }
-    else if pass == p_shade() { 26 }
+    if pass == p_gen() { 16 }
+    else if pass == p_isect() { 45 }
+    else if pass == p_shadow() { 18 }
+    else if pass == p_shade() { 29 }
     else { 2 }
+}
+
+fn ru_zero() -> RuOut {
+    RuOut$(mode: 0, idx: 0, obj: 0, t: 0, hit: false, dn: [0, 0, 0], o: [0, 0, 0], d: [0, 0, 0])
+}
+
+fn su_zero() -> SuOut {
+    SuOut$(shade: false, idx: 0, pix: 0, p: [0, 0, 0], r: [0, 0, 0], hit: false,
+           spawn_shadow: false, refl: false, tp_next: 0, acc: [0, 0, 0])
 }
 
 fn add3(a: [int<28>; 3], b: [int<28>; 3]) -> [int<28>; 3] {
@@ -228,18 +237,19 @@ pub entity tracer(
     let odd: bool = quality && (ybit != phase);
 
     // ------------------------------------------------------------ culling
-    let r0 = krange(pj.sph[0], y, quality);
-    let r1 = krange(pj.sph[1], y, quality);
-    let r2 = krange(pj.sph[2], y, quality);
-    let r3 = krange(pj.sph[3], y, quality);
-    let r4 = krange(pj.sph[4], y, quality);
-    let r5 = krange(pj.sph[5], y, quality);
-    let h0 = krange(pj.shd[0], y, quality);
-    let h1 = krange(pj.shd[1], y, quality);
-    let h2 = krange(pj.shd[2], y, quality);
-    let h3 = krange(pj.shd[3], y, quality);
-    let h4 = krange(pj.shd[4], y, quality);
-    let h5 = krange(pj.shd[5], y, quality);
+    // Registered (they change once per line, well before a sweep uses them).
+    reg(clk) r0: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.sph[0], y, quality);
+    reg(clk) r1: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.sph[1], y, quality);
+    reg(clk) r2: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.sph[2], y, quality);
+    reg(clk) r3: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.sph[3], y, quality);
+    reg(clk) r4: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.sph[4], y, quality);
+    reg(clk) r5: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.sph[5], y, quality);
+    reg(clk) h0: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.shd[0], y, quality);
+    reg(clk) h1: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.shd[1], y, quality);
+    reg(clk) h2: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.shd[2], y, quality);
+    reg(clk) h3: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.shd[3], y, quality);
+    reg(clk) h4: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.shd[4], y, quality);
+    reg(clk) h5: (bool, uint<9>, uint<9>) reset(rst: (false, 0, 0)) = krange(pj.shd[5], y, quality);
     let ns_ = scene.nsph;
     let use_i: [bool; 6] = [ns_ > 0, ns_ > 1, ns_ > 2, ns_ > 3, ns_ > 4, ns_ > 5];
     let prim = depth == 0;
@@ -362,8 +372,7 @@ pub entity tracer(
     let ru_dn = match ru_out { Some(o) => o.dn, None => [0, 0, 0] };
     let su = match su_out {
         Some(o) => o,
-        None => SuOut$(shade: false, idx: 0, pix: 0, p: [0, 0, 0], r: [0, 0, 0], hit: false,
-                       spawn_shadow: false, refl: false, tp_next: 0, acc: [0, 0, 0]),
+        None => su_zero(),
     };
     let su_valid = su_out.is_some();
     let su_spawn_p = su_valid && !su.shade && su.hit;
@@ -386,7 +395,7 @@ pub entity tracer(
     let cand_valid = cand.is_some();
     let cc = match cand {
         Some(c) => c,
-        None => RuOut$(mode: 0, idx: 0, obj: 0, t: 0, hit: false, dn: [0, 0, 0], o: [0, 0, 0], d: [0, 0, 0]),
+        None => ru_zero(),
     };
     decl hit_rd;
     let better = cand_valid && cc.hit && cc.t < hit_rd.t;
@@ -442,7 +451,15 @@ pub entity tracer(
     } else {
         None
     };
-    let ru_out = inst(14) ray_unit(clk, ru_in);
+    // Registered: the input mux would otherwise run into the unit's first subtract.
+    reg(clk) ru_in_r: Option<RuIn> reset(rst: None) = ru_in;
+    // The unit outputs are registered too. Synthesis builds the pipelines'
+    // delay lines from RAM, whose outputs are slow; the data registers reset
+    // to zero so they cannot be folded into those RAMs.
+    let ru_out_p = inst(14) ray_unit(clk, ru_in_r);
+    reg(clk) ru_v reset(rst: false) = ru_out_p.is_some();
+    reg(clk) ru_d: RuOut reset(rst: ru_zero()) = match ru_out_p { Some(o) => o, None => ru_zero() };
+    let ru_out = if ru_v { Some(ru_d) } else { None };
 
     // The shading unit is fed from the last ISECT sweep (the floor: each
     // ray's final hit) or from the front end (SHADE).
@@ -484,7 +501,12 @@ pub entity tracer(
     } else {
         None
     };
-    let su_out = inst(22) shade_unit(clk, su_in, light);
+    // Registered: the fused spawn input comes straight from the Hit RAM compare.
+    reg(clk) su_in_r: Option<SuIn> reset(rst: None) = su_in;
+    let su_out_p = inst(22) shade_unit(clk, su_in_r, light);
+    reg(clk) su_v reset(rst: false) = su_out_p.is_some();
+    reg(clk) su_d: SuOut reset(rst: su_zero()) = match su_out_p { Some(o) => o, None => su_zero() };
+    let su_out = if su_v { Some(su_d) } else { None };
 
     let into_isect = drain_end && np == p_isect();
     reg(clk) ns: uint<9> reset(rst: 0) = if into_isect { 0 } else if su_spawn_s { trunc(ns + 1) } else { ns };
@@ -538,8 +560,9 @@ pub entity tracer(
     let wk8: uint<8> = trunc(wk >> 1);
     let waddr: uint<9> = slot.concat(wk8);
     let is_odd = wk.as_bits()[0];
-    let buf_even = if px_w && !is_odd { Some((waddr, rgb)) } else { None };
-    let buf_odd = if px_w && is_odd { Some((waddr, rgb)) } else { None };
+    // Registered on the way to the line buffer.
+    reg(clk) buf_even: Option<(uint<9>, uint<16>)> reset(rst: None) = if px_w && !is_odd { Some((waddr, rgb)) } else { None };
+    reg(clk) buf_odd: Option<(uint<9>, uint<16>)> reset(rst: None) = if px_w && is_odd { Some((waddr, rgb)) } else { None };
     reg(clk) line_done reset(rst: None) = if drain_end && batch_end { Some((slot, y)) } else { None };
 
     // ------------------------------------------------------------ stats

@@ -6,7 +6,7 @@
 // shadows and reflections; the camera, sun and spheres move on their own or
 // under UART control (115200 8N1, see docs/uart-protocol.md). Clock domains:
 //   clk_pix  25.2 MHz  video timing, scanout, TMDS encoding
-//   clk_core 54   MHz  tracer, camera setup, animator, SDRAM, UART, control
+//   clk_core 75   MHz  tracer, camera setup, animator, SDRAM, UART, control
 
 mod video;
 mod uart;
@@ -49,7 +49,7 @@ extern entity sdram_clk(clk: clock, sdram_clk: inv bool);
 #[no_mangle(all)]
 extern entity dq_capture(clk: clock, d: uint<32>, q: inv uint<32>);
 
-fn clocks_per_bit() -> uint<16> { 469 } // 54 MHz / 115200
+fn clocks_per_bit() -> uint<16> { 651 } // 75 MHz / 115200
 
 // Turns a push button into a one-cycle pulse per press. The level seen after
 // reset is taken as "released", so either button polarity works. Samples

@@ -1,5 +1,5 @@
 // 8N1 UART. `clocks_per_bit` is the clock frequency divided by the baud rate
-// (54 MHz / 115200 = 469).
+// (75 MHz / 115200 = 651).
 
 enum RxState {
     Idle,

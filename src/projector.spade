@@ -38,8 +38,9 @@ pub struct ProjOut {
 }
 
 // floor(mag / den) to 17 bits, one quotient bit per cycle, with a flag for a
-// non-zero remainder. A quotient of 2^17 or more saturates. The result is
-// registered, so it always arrives at least one cycle after the start.
+// non-zero remainder. A quotient of 2^17 or more saturates. The start and
+// the result are registered, so the result arrives at least two cycles after
+// the start.
 struct DivState {
     rem: uint<41>,
     // den << b, for quotient bit b
@@ -48,8 +49,9 @@ struct DivState {
     b: uint<5>,
 }
 
-entity udiv(clk: clock, rst: bool, start: Option<(uint<41>, uint<36>)>) -> Option<(uint<17>, bool)> {
+entity udiv(clk: clock, rst: bool, start_in: Option<(uint<41>, uint<36>)>) -> Option<(uint<17>, bool)> {
     decl st;
+    reg(clk) start: Option<(uint<41>, uint<36>)> reset(rst: None) = start_in;
     let (nst, out): (Option<DivState>, Option<(uint<17>, bool)>) = match start {
         Some((mag, den)) => {
             let big: uint<53> = zext(den) << 17u53;
@@ -93,6 +95,8 @@ enum Ph {
     Post{i: uint<3>, b: uint<1>, k: uint<2>},
     Div{i: uint<3>, b: uint<1>, n: uint<2>},
     DivWait{i: uint<3>, b: uint<1>, n: uint<2>},
+    // the box edges are registered
+    Edges{i: uint<3>, b: uint<1>},
     Store{i: uint<3>, b: uint<1>},
     Foot{i: uint<3>, k: uint<3>},
     Done,
@@ -152,20 +156,23 @@ pub entity projector(
     // ---------------------------------------------------------- operands
     let ti: uint<3> = match ph {
         Ph::Lset(i, _) => i, Ph::Dot(i, _, _) => i, Ph::Post(i, _, _) => i, Ph::Div(i, _, _) => i,
-        Ph::DivWait(i, _, _) => i, Ph::Store(i, _) => i, Ph::Foot(i, _) => i, _ => 0,
+        Ph::DivWait(i, _, _) => i, Ph::Edges(i, _) => i, Ph::Store(i, _) => i, Ph::Foot(i, _) => i, _ => 0,
     };
     let tb: uint<1> = match ph {
         Ph::Lset(_, b) => b, Ph::Dot(_, b, _) => b, Ph::Post(_, b, _) => b, Ph::Div(_, b, _) => b,
-        Ph::DivWait(_, b, _) => b, Ph::Store(_, b) => b, _ => 0,
+        Ph::DivWait(_, b, _) => b, Ph::Edges(_, b) => b, Ph::Store(_, b) => b, _ => 0,
     };
     let st = sphere_static(ti);
-    let rr: int<18> = st.r +. (st.r >>> 4) +. 16;
     let c = centres[ti];
+    // Per-sphere constants, registered: the sphere index is set at Lset, and
+    // these are first used at Post and Foot, many cycles later.
+    reg(clk) rr: int<18> reset(rst: 0) = st.r +. (st.r >>> 4) +. 16;
+    reg(clk) cr: [int<18>; 3] reset(rst: [0, 0, 0]) = c;
+    reg(clk) cy_rr: int<18> reset(rst: 0) = sat18(sext(cr[1]) +. sext(rr));
     let target = if tb == 0 { c } else { foot };
     let fov18: int<18> = zext(fov).as_int();
     let fv18: int<18> = fov18 -. (fov18 >>> 2);
     let sq: int<18> = trunc(s >>> 4);
-    let cy_rr = sat18(sext(c[1]) +. sext(rr));
     // lambda straight from the product in the cycle it is computed (Foot 1)
     let f1 = match ph { Ph::Foot(_, 1) => true, _ => false };
     let lam_now: int<24> = if f1 { trunc(prod >>> 12) } else { lam };
@@ -269,9 +276,9 @@ pub entity projector(
     let f4 = match ph { Ph::Foot(_, 4) => true, _ => false };
     reg(clk) lam: int<24> reset(rst: 0) = if f1 { trunc(prod >>> 12) } else { lam };
     let off: int<19> = trunc(prod >>> 16);
-    let fw: int<20> = sext(c[0]) - off;
-    let fy: int<20> = sext(c[1]) - off;
-    let fz: int<20> = sext(c[2]) - off;
+    let fw: int<20> = sext(cr[0]) - off;
+    let fy: int<20> = sext(cr[1]) - off;
+    let fz: int<20> = sext(cr[2]) - off;
     reg(clk) foot: [int<18>; 3] reset(rst: [0, 0, 0]) = [
         if f2 { sat20(fw) } else { foot[0] },
         if f3 { sat20(fy) } else { foot[1] },
@@ -282,7 +289,8 @@ pub entity projector(
         else if f3 { foot_ok && !big20(fy) }
         else if f4 { foot_ok && !big20(fz) }
         else { foot_ok };
-    let foot_ok_now = foot_ok && !big20(fz);
+    // Foot 5: foot_ok is final.
+    let f5 = match ph { Ph::Foot(_, 5) => true, _ => false };
 
     // ------------------------------------------------------------- boxes
     let wh: int<12> = if quality { 320 } else { 160 };
@@ -293,9 +301,10 @@ pub entity projector(
     let x1: int<12> = wh +. 1 -. qv[1];
     let y0: int<12> = hh -. 2 +. qv[2];
     let y1: int<12> = hh +. 1 -. qv[3];
-    let offscreen = x0 > wm1 || x1 < 0 || y0 > hm1 || y1 < 0;
     let fb = full_box(quality);
-    let clamped = if full { fb } else {
+    // Registered during Edges, used at Store.
+    reg(clk) offscreen reset(rst: false) = x0 > wm1 || x1 < 0 || y0 > hm1 || y1 < 0;
+    reg(clk) clamped: Box reset(rst: fb) = if full { fb } else {
         Box$(on: true, x0: clampx(x0, wm1), x1: clampx(x1, wm1), y0: clampy(y0, hm1), y1: clampy(y1, hm1))
     };
     let off_box = Box$(on: false, x0: 0, x1: 0, y0: 0, y1: 0);
@@ -305,7 +314,7 @@ pub entity projector(
     let sph_box = if !full && offscreen { off_box } else { clamped };
     reg(clk) keep_a: Box reset(rst: fb) = if store_a { clamped } else { keep_a };
     let no_foot_a = store_a && !invly_ok;
-    let no_foot_f = f4 && !foot_ok_now;
+    let no_foot_f = f5 && !foot_ok;
     reg(clk) sph: [Box; 6] reset(rst: [fb, fb, fb, fb, fb, fb]) = setb(sph, ti, store_a, sph_box);
     reg(clk) shd: [Box; 6] reset(rst: [fb, fb, fb, fb, fb, fb]) =
         setb(setb(shd, ti, no_foot_a || no_foot_f, fb), ti, store_b, union(keep_a, clamped));
@@ -323,17 +332,18 @@ pub entity projector(
         Ph::Post(i, b, k) => if k == 3 { Ph::Div(i, b, 0) } else { Ph::Post(i, b, trunc(k + 1)) },
         Ph::Div(i, b, n) => Ph::DivWait(i, b, n),
         Ph::DivWait(i, b, n) => if div_done {
-            if n == 3 { Ph::Store(i, b) } else { Ph::Div(i, b, trunc(n + 1)) }
+            if n == 3 { Ph::Edges(i, b) } else { Ph::Div(i, b, trunc(n + 1)) }
         } else {
             ph
         },
+        Ph::Edges(i, b) => Ph::Store(i, b),
         Ph::Store(i, b) => if b == 0 {
             if invly_ok { Ph::Foot(i, 0) } else { if i == 5 { Ph::Done } else { Ph::Lset(trunc(i + 1), 0) } }
         } else {
             if i == 5 { Ph::Done } else { Ph::Lset(trunc(i + 1), 0) }
         },
-        Ph::Foot(i, k) => if k == 4 {
-            if foot_ok_now { Ph::Lset(i, 1) } else { if i == 5 { Ph::Done } else { Ph::Lset(trunc(i + 1), 0) } }
+        Ph::Foot(i, k) => if k == 5 {
+            if foot_ok { Ph::Lset(i, 1) } else { if i == 5 { Ph::Done } else { Ph::Lset(trunc(i + 1), 0) } }
         } else {
             Ph::Foot(i, trunc(k + 1))
         },

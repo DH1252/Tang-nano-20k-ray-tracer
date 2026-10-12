@@ -37,7 +37,7 @@ module tb_clocks;
         measure(0, "clk_ser", 126.0);
         measure(1, "clk_pix", 25.2);
         measure(3, "clk_42", 42.0);
-        measure(2, "clk_core", 54.0);
+        measure(2, "clk_core", 75.0);
         $finish;
     end
     initial begin #2000000000; $display("FAIL timeout, locked=%b", locked); $finish; end

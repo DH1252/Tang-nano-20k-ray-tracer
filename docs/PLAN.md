@@ -45,10 +45,19 @@ Python model (`model/hw.py`). Nothing has run on a board yet.
     unit's spawn step directly, and SHADE writes each finished pixel into the
     line buffer, so the SPAWN and WRITE passes are gone (WRITE remains for
     the test pattern).
-  - Measured in the system simulation at 54 MHz, default scene: 44.5 fps at
-    640×480 (sun at 12.7°), 48.7 fps with the sun at 22°, 53.7 fps at 34°,
-    and 31.7 fps with a reflective floor (kr ¼). 320×240 takes about half
-    as long, so the display's 60 Hz is the limit there.
+  - Measured in the system simulation, default scene, 640×480: 1.22 M
+    cycles per frame (sun at 12.7°), 1.12 M with the sun at 22°, 1.01 M at
+    34°, and 1.71 M with a reflective floor (kr ¼). At 54 MHz that is 44, 48,
+    53 and 32 fps; at 75 MHz, 61, 67, 74 and 44 fps, so the display's 60 Hz
+    is the limit for the matt floor. 320×240 takes about half as long.
+- **75 MHz core clock** (after M5): `pll_core` makes 42 × 25 / 14 MHz (PFD
+  3 MHz, VCO 600 MHz); the UART divides by 651; the SDRAM timings (CL2,
+  2-cycle tRCD/tRP/tWR, 7-cycle tRFC) were already sized for 100 MHz. For
+  timing, the tracer registers the inputs and outputs of the ray and shading
+  units (synthesis builds their delay lines from RAM, whose outputs are
+  slow), the pixel writes and the per-line cull ranges, and the projector
+  registers its per-sphere constants, box edges and divider. Synthesis
+  estimates the core at 82 MHz.
 
 The RTL is in Spade rather than Verilog (§6). The sections below are the
 original plan. Where the build differs from it:
@@ -306,7 +315,7 @@ A soft CPU replaces it in Tier 2.
   clock. With 800×525 total that is 60.0 Hz, which monitors accept as
   640×480@60.
 - **PLL1:** 27 MHz → core clock. Start at 54 MHz and raise it to 75 MHz once
-  timing is known. The SDRAM shares this domain from M5.
+  timing is known (done: 75 MHz). The SDRAM shares this domain from M5.
 - **Clock crossing:** the framebuffer BSRAM is dual-clock (the core clock
   writes, the pixel clock reads). Frame-start and vsync flags cross through
   2-FF synchronisers.

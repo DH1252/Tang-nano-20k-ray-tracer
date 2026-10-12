@@ -76,8 +76,8 @@ def scene_dec(v):
 
 
 def cycles_dec(v):
-    ms = v * 256 / 54e3
-    return f"{v * 256} cycles = {ms:.1f} ms = {1000 / ms:.1f} fps at 54 MHz" if v else "no frame yet"
+    ms = v * 256 / 75e3
+    return f"{v * 256} cycles = {ms:.1f} ms = {1000 / ms:.1f} fps at 75 MHz" if v else "no frame yet"
 
 
 # name: (address, encode, decode, unit)

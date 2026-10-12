@@ -1,7 +1,7 @@
 // Clock generation for the Tang Nano 20K (27 MHz crystal).
 //   clk_ser  126.0 MHz  TMDS bit clock (OSER10 FCLK, DDR -> 252 Mbit/s)
 //   clk_pix   25.2 MHz  640x480@60 pixel clock (clk_ser / 5)
-//   clk_core  54.0 MHz  renderer, SDRAM, UART
+//   clk_core  75.0 MHz  renderer, SDRAM, UART
 //
 // Only the video PLL takes the 27 MHz crystal (pin 4); the core PLL is
 // cascaded from the video PLL's CLKOUTD3 (126 / 3 = 42 MHz) over the clock
@@ -50,9 +50,9 @@ module clocks (
         .CLKOUT_FT_DIR(1'b1), .CLKOUTP_FT_DIR(1'b1), .CLKOUT_DLY_STEP(0), .CLKOUTP_DLY_STEP(0),
         .CLKFB_SEL("internal"), .CLKOUT_BYPASS("false"), .CLKOUTP_BYPASS("false"),
         .CLKOUTD_BYPASS("false"), .DYN_SDIV_SEL(2), .CLKOUTD_SRC("CLKOUT"), .CLKOUTD3_SRC("CLKOUT"),
-        .IDIV_SEL(6),     // PFD 6 MHz
-        .FBDIV_SEL(8),    // 42 * 9 / 7 = 54 MHz
-        .ODIV_SEL(16)     // VCO 864 MHz
+        .IDIV_SEL(13),    // PFD 3 MHz (the rPLL minimum; 75 = 3 * 25 leaves no larger one)
+        .FBDIV_SEL(24),   // 42 * 25 / 14 = 75 MHz
+        .ODIV_SEL(8)      // VCO 600 MHz
     ) pll_core (
         .CLKIN(clk_42), .CLKOUT(clk_core), .LOCK(lock_core),
         .CLKOUTP(), .CLKOUTD(), .CLKOUTD3(),

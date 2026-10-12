@@ -38,8 +38,8 @@ module tb;
     );
 
     // ---------------------------------------------------------------- UART
-    // The DUT divides 54 MHz by 469: one bit = 469 core clocks.
-    localparam BIT = 469 * 18518;
+    // The DUT divides 75 MHz by 651: one bit = 651 core clocks.
+    localparam BIT = 651 * 13334;
 
     task send_byte(input [7:0] b);
         integer i;

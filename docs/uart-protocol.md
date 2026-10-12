@@ -75,17 +75,18 @@ All registers are 16 bits wide. Angles are fractions of a turn: `0x4000` is
 | 10   | anim          | animation time                 | `0x0000` | sphere angles are `anim × k + phase` (see `SPHERES` in `scripts/gen_tables.py`) |
 | 11   | anim_speed    | added per frame                | `0x0040` | added to anim every rendered frame while sphere motion is on |
 | 12   | scene         | bits 1:0 bounces, 3:2 floor reflectivity (quarters), 6:4 spheres | `0x0061` | 1 bounce, matt floor, 6 spheres; more than 6 counts as 6 |
-| 13   | cycles        | clock cycles per frame / 256   |          | read only: the last finished frame (54 MHz: 0x1284 ≈ 22 ms ≈ 44.5 fps for the default 640×480 view) |
+| 13   | cycles        | clock cycles per frame / 256   |          | read only: the last finished frame (75 MHz: 0x129e ≈ 16.3 ms ≈ 61 fps for the default 640×480 view) |
 
 The camera orbits `target` at distance `dist`: yaw 0 looks along −z. The sun
 is a directional light. Auto-motion adds the speed registers once per
 rendered frame. The display always runs at 60 Hz. In the 640×480 quality
 mode each frame traces one checkerboard half of the pixels, and the display
 fills the other half from the previous frame (or, after a change of mode,
-from the neighbouring pixel). The default view takes about 22 ms per frame
-(44.5 fps at 54 MHz); a higher sun is faster, a reflective floor slower
-(`R 13` shows it). A 320×240 frame takes about half as long. A finished frame
-is shown at the next vertical blank, so the picture never tears.
+from the neighbouring pixel). The default view takes about 16.3 ms per
+frame at 75 MHz (61 fps, so the display's 60 Hz is the limit); a higher sun
+is faster, a reflective floor slower (about 23 ms at kr ¼; `R 13` shows it).
+A 320×240 frame takes about half as long. A finished frame is shown at the
+next vertical blank, so the picture never tears.
 
 ## Bring-up hints
 
@@ -93,4 +94,4 @@ is shown at the next vertical blank, so the picture never tears.
   for the test pattern: colour bars over a grey ramp, with a white border.
 - **Test pattern garbled, smeared or shifted:** the SDRAM read latency is
   wrong for your board. Try `W 0D 0003` and `W 0D 0005`. 4 is the value the
-  timing analysis and simulation give for the 54 MHz clock.
+  timing analysis and simulation give for the 75 MHz clock.

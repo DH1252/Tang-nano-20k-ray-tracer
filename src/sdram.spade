@@ -58,7 +58,7 @@ fn c_mrs() -> uint<4> { 0b0000 }
 
 fn last_col() -> uint<8> { 159 }
 fn init_wait() -> uint<15> { 20000 }   // >= 200 us at up to 100 MHz
-fn ref_interval() -> uint<10> { 600 }  // ~11 us at 54 MHz (spec: 15.6 us)
+fn ref_interval() -> uint<10> { 600 }  // 8 us at 75 MHz (spec: 15.6 us)
 fn t_rfc() -> uint<3> { 7 }
 // Mode register: burst length 1, sequential, CAS latency 2, burst writes.
 fn mode_reg() -> uint<11> { 0x020 }

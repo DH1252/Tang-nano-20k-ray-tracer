@@ -27,7 +27,7 @@ swim build
 "$NEXTPNR" --json build/hardware.json --write build/pnr.json \
     --device GW2AR-LV18QN88C8/I7 --vopt family=GW2A-18C \
     --vopt cst=constraints/tangnano20k.cst \
-    --freq 54 --seed "$SEED" \
+    --freq 75 --seed "$SEED" \
     --report build/pnr_report.json -l build/nextpnr.log
 
 gowin_pack -d GW2A-18C -o build/tn20k_raytracer.fs build/pnr.json

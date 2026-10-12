@@ -14,5 +14,5 @@ module clocks (
     // The serial clock only feeds the serialisers, which the simulated DVI
     // receiver bypasses, so it stays low; the pixel clock is generated directly.
     always #19841 clk_pix = ~clk_pix;     // 25.2 MHz (39.68 ns)
-    always #9259 clk_core = ~clk_core;    // 54.0 MHz (18.52 ns)
+    always #6667 clk_core = ~clk_core;    // 75.0 MHz (13.33 ns)
 endmodule

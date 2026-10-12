@@ -14,13 +14,14 @@ against the Python model. Nothing has run on a board yet.
 - Scanline-batched passes over one shared intersection unit and one shading
   unit ([plan](docs/PLAN.md) §4.2). Per-frame screen boxes for every sphere
   and its shadow let each line test only the spheres that can touch it.
-- 640×480 at about 45 fps for the default scene at a 54 MHz core clock (key
-  `v` or button S2): each frame traces one checkerboard half of the pixels,
-  and the display takes the other half from the previous frame. A higher sun
-  is faster (about 49 fps at 22°, 54 at 34°); a reflective floor is slower
-  (about 32 fps at kr ¼).
-- 320×240 (pixel-doubled) traces in about half the time, so the display's
-  60 Hz is the limit.
+- 640×480 at the display's full 60 fps for the default scene, with a 75 MHz
+  core clock (key `v` or button S2): each frame traces one checkerboard half
+  of the pixels, and the display takes the other half from the previous
+  frame. The tracer alone would manage about 61 fps for the default view (a
+  low sun), 67 fps with the sun at 22° and 74 at 34°; a reflective floor
+  (kr ¼) brings it down to about 44 fps.
+- 320×240 (pixel-doubled) traces in about half the time, also shown at
+  60 fps.
 - 640×480@60 DVI out of the HDMI connector, from a triple-buffered RGB565
   framebuffer in the chip's embedded SDRAM. Buffers swap during vertical
   blanking, so there is no tearing.
@@ -71,7 +72,7 @@ Notes on the Gowin flow:
   settings, taken from SUG1220-2.1E.
   - Synthesis: `-opt_goal timing`, `-map_option 3` and `-netlist_hierarchy 0`
     (flatten). `-map_option 4` and a lower `-max_fanout` buy more speed for
-    more LUTs, if the timing report shows the 54 MHz core clock needs it.
+    more LUTs, if the timing report shows the 75 MHz core clock needs it.
   - Place and route: timing-driven, `-place_option 2`, `-route_option 1`,
     resource replication, `-retiming_resource all`, clocks routed fastest
     first, hold fixing, and I/O registers in the IOBs.
@@ -110,12 +111,17 @@ Notes on the Gowin flow:
 `scripts/build_oss.sh` is the open-source alternative (Yosys, nextpnr-himbaechel,
 apicula); it has not been run on the tracer.
 
-Resources from a GowinSynthesis run of this version (V1.9.11.03, synthesis
-only, before place and route, so fmax is an estimate):
+Resources from a GowinSynthesis run of the checkerboard version at 54 MHz
+(V1.9.11.03, synthesis only, before place and route, so fmax is an
+estimate):
 
-| Logic (LUT + ALU + RAM16) | Registers | Block RAM | 18×18 multipliers | PLLs | core fmax estimate (needed) |
-|---------------------------|-----------|-----------|-------------------|------|-----------------------------|
-| 14,374 / 20,736 (70 %) | 6,412 / 15,552 | 35 / 46 | ≈ 44.5 / 48 | 2 / 2 | 63.3 MHz (54) |
+| Logic (LUT + ALU + RAM16) | Registers | Block RAM | 18×18 multipliers | PLLs | core fmax estimate |
+|---------------------------|-----------|-----------|-------------------|------|--------------------|
+| 14,374 / 20,736 (70 %) | 6,412 / 15,552 | 35 / 46 | ≈ 44.5 / 48 | 2 / 2 | 63.3 MHz |
+
+The 75 MHz version adds pipeline registers (about 1,300 more flip-flops).
+A synthesis-only probe of it estimated the core at about 82 MHz. Your
+place-and-route report is the real figure.
 
 The multiplier count adds up 18 MULT18X18, 11 MULTADDALU18X18 and 2
 MULTALU36X18 (two multipliers each), and 1 MULT9X9. The colour products are
