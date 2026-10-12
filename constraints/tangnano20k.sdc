@@ -13,3 +13,6 @@ create_generated_clock -name clk_ser -source [get_ports {clk}] -master_clock clk
 create_generated_clock -name clk_pix -source [get_pins {clocks_0/pll_ser/CLKOUT}] -master_clock clk_ser -divide_by 5 [get_pins {clocks_0/div5/CLKOUT}]
 create_generated_clock -name clk_core -source [get_pins {clocks_0/pll_ser/CLKOUT}] -master_clock clk_ser -multiply_by 3 -divide_by 7 [get_pins {clocks_0/pll_core/CLKOUT}]
 set_clock_groups -asynchronous -group [get_clocks {clk_core}] -group [get_clocks {clk_ser clk_pix}]
+
+// Worst core-clock setup paths, listed in the timing report.
+report_timing -setup -from_clock [get_clocks {clk_core}] -to_clock [get_clocks {clk_core}] -max_paths 5 -max_common_paths 1

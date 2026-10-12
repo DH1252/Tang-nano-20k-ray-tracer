@@ -47,3 +47,13 @@ IO_PORT "tmds_d_p[1]" PULL_MODE=NONE;
 IO_PORT "tmds_d_n[1]" PULL_MODE=NONE;
 IO_PORT "tmds_d_p[2]" PULL_MODE=NONE;
 IO_PORT "tmds_d_n[2]" PULL_MODE=NONE;
+
+// PLL placement. The 27 MHz crystal is on pin 4 (IOL7A), which is LPLL1_T_IN:
+// the dedicated reference input of the top-left PLL only. Placing the
+// crystal-fed video PLL there keeps its reference off general routing
+// (otherwise Gowin warns PR1014 for clk_d). The core PLL is cascaded from the
+// video PLL over the clock network, so it takes the other left-side site.
+// If PR1014 still appears, swap the two indices (Gowin's site numbering is
+// not in its documentation; the place-and-route report shows the sites used).
+INS_LOC "clocks_0/pll_ser" PLL_L[0];
+INS_LOC "clocks_0/pll_core" PLL_L[1];
