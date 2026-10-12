@@ -3,10 +3,10 @@
 //   clk_pix   25.2 MHz  640x480@60 pixel clock (clk_ser / 5)
 //   clk_core  54.0 MHz  renderer, SDRAM, UART
 //
-// Pin 4 (the 27 MHz crystal) is LPLL1_T_IN, the dedicated input of one PLL
-// only. So the video PLL takes the crystal, and the core PLL is cascaded from
-// the video PLL's CLKOUTD3 (126 / 3 = 42 MHz) over the clock network, rather
-// than reaching pin 4 through general routing (Gowin warning PR1014).
+// Only the video PLL takes the 27 MHz crystal (pin 4); the core PLL is
+// cascaded from the video PLL's CLKOUTD3 (126 / 3 = 42 MHz) over the clock
+// network, so just one PLL reference uses the general route Gowin reports as
+// PR1014 for pin 4 (see constraints/tangnano20k.cst).
 // PLL dividers from apicula's gowin_pll; the other parameters are the values
 // Gowin's IP generator emits for a fixed-frequency rPLL on the GW2AR-18C.
 module clocks (
