@@ -1,4 +1,6 @@
-// Timing constraints for Gowin EDA.
+// Timing constraints for Gowin EDA. A template: scripts/clock_config.py writes
+// build/tangnano20k.sdc with clk_core's ratio for the chosen core clock, and
+// the Gowin project uses that copy. The values here are the 75 MHz defaults.
 //
 // clk27 is the crystal on pin 4. The PLL and divider outputs are generated
 // clocks so the timing analyser knows how they relate:

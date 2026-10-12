@@ -2,7 +2,8 @@
 # Gowin EDA build of gowin/tn20k_raytracer/tn20k_raytracer.gprj.
 #
 #   scripts/build.sh prepare   generate the Verilog the project uses
-#                              (build/spade_plain.v); then open the .gprj in
+#                              (build/spade_plain.v, build/clocks.v and
+#                              build/tangnano20k.sdc); then open the .gprj in
 #                              the Gowin IDE and press Run All
 #   scripts/build.sh           prepare, then build headless with gw_sh
 #                              -> gowin/tn20k_raytracer/impl/pnr/tn20k_raytracer.fs
@@ -10,6 +11,10 @@
 #                              in the project so the IDE uses them; lists every
 #                              option in build/gowin_options.tcl. Close the
 #                              project in the IDE first.
+#
+# The core clock is 75 MHz unless CORE_MHZ is set (25..100), for example
+#   CORE_MHZ=66 scripts/build.sh prepare
+# scripts/clock_config.py picks the closest PLL setting not above it.
 #
 # Needs swim and Gowin EDA. Set GOWIN_HOME to the install directory (the one
 # containing IDE/bin/gw_sh) or GW_SH to the gw_sh binary. Licensing is whatever
@@ -38,6 +43,7 @@ if [ "${1:-}" = options ]; then
 fi
 
 python3 scripts/gen_tables.py
+python3 scripts/clock_config.py
 swim build
 # Gowin place and route cannot read back some of Spade's escaped identifiers.
 python3 scripts/plain_identifiers.py build/spade.sv build/spade_plain.v

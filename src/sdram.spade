@@ -6,7 +6,8 @@
 // a READ or WRITE command on every cycle, so the column address simply counts.
 //
 // Timing is chosen for clocks up to 100 MHz (CL = 2):
-//   tRP, tRCD, tWR, tMRD = 2 cycles, tRFC = 7 cycles, refresh every 600 cycles.
+//   tRP, tRCD, tWR, tMRD = 2 cycles, tRFC = 7 cycles, a refresh every 8 us
+//   (`ref_interval` cycles, set with the clock by scripts/clock_config.py).
 // The SDRAM clock pin is driven with the inverted controller clock, so command
 // and data outputs launched on a rising edge are sampled half a cycle later.
 // Read data is captured on the controller's falling edge (the SDRAM's own CL2
@@ -58,7 +59,6 @@ fn c_mrs() -> uint<4> { 0b0000 }
 
 fn last_col() -> uint<8> { 159 }
 fn init_wait() -> uint<15> { 20000 }   // >= 200 us at up to 100 MHz
-fn ref_interval() -> uint<10> { 600 }  // 8 us at 75 MHz (spec: 15.6 us)
 fn t_rfc() -> uint<3> { 7 }
 // Mode register: burst length 1, sequential, CAS latency 2, burst writes.
 fn mode_reg() -> uint<11> { 0x020 }
@@ -89,10 +89,12 @@ pub entity sdram_ctrl(
     // Registered value of the DQ pins (None while the controller drives them).
     dq_in: uint<32>,
     rd_lat: uint<3>,
+    // Core cycles between refreshes (8 us; spec 15.6 us), set with the clock.
+    ref_interval: uint<10>,
 ) -> SdramOut {
     decl state, ref_count, ready, bank;
 
-    let ref_due = ref_count >= ref_interval();
+    let ref_due = ref_count >= ref_interval;
 
     // Each arm decides the command for the next cycle:
     // (next state, command, address, drive DQ, accept, write done, issued read column,

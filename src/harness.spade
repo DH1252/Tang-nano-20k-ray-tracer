@@ -13,7 +13,7 @@ pub struct UartControlOut {
 pub entity uart_control(clk: clock, rst: bool, rx: bool, clocks_per_bit: uint<16>, frame_tick: bool) -> UartControlOut {
     let byte = inst lib::uart::uart_rx(clk, rst, rx, clocks_per_bit);
     let (tx_ready, tx_ready_inv) = port();
-    let c = inst lib::control::control(clk, rst, byte, tx_ready, frame_tick, false, false, 0x1234, 0x0001, 0x0042);
+    let c = inst lib::control::control(clk, rst, byte, tx_ready, frame_tick, false, false, 0x1234, 0x0001, 0x0042, 7500);
     let t = inst lib::uart::uart_tx(clk, rst, c.tx, clocks_per_bit);
     set tx_ready_inv = t.ready;
     UartControlOut$(tx: t.tx, params: c.params)

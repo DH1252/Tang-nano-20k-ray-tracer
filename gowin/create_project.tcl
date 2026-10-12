@@ -11,11 +11,11 @@ create_project -name tn20k_raytracer -dir gowin -pn GW2AR-LV18QN88C8/I7 -device_
 # create_project switches into gowin/tn20k_raytracer: paths are relative to it.
 add_file -type verilog ../../build/spade_plain.v
 add_file -type verilog ../../rtl/dq_capture.v
-add_file -type verilog ../../rtl/gowin/clocks.v
+add_file -type verilog ../../build/clocks.v   ;# from rtl/gowin/clocks.v, scripts/clock_config.py
 add_file -type verilog ../../rtl/gowin/dvi_phy.v
 add_file -type verilog ../../rtl/gowin/sdram_clk.v
 add_file -type cst ../../constraints/tangnano20k.cst
-add_file -type sdc ../../constraints/tangnano20k.sdc
+add_file -type sdc ../../build/tangnano20k.sdc ;# from constraints/, scripts/clock_config.py
 
 set_option -top_module top
 set_option -verilog_std sysv2017

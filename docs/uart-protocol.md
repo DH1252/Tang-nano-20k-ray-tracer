@@ -76,6 +76,7 @@ All registers are 16 bits wide. Angles are fractions of a turn: `0x4000` is
 | 11   | anim_speed    | added per frame                | `0x0040` | added to anim every rendered frame while sphere motion is on |
 | 12   | scene         | bits 1:0 bounces, 3:2 floor reflectivity (quarters), 6:4 spheres | `0x0061` | 1 bounce, matt floor, 6 spheres; more than 6 counts as 6 |
 | 13   | cycles        | clock cycles per frame / 256   |          | read only: the last finished frame (75 MHz: 0x129e ≈ 16.3 ms ≈ 61 fps for the default 640×480 view) |
+| 14   | core_clock    | core clock in units of 10 kHz  |          | read only: 0x1d4c = 75.00 MHz; set at build time (`CORE_MHZ`) |
 
 The camera orbits `target` at distance `dist`: yaw 0 looks along −z. The sun
 is a directional light. Auto-motion adds the speed registers once per

@@ -7,6 +7,7 @@
 // under UART control (115200 8N1, see docs/uart-protocol.md). Clock domains:
 //   clk_pix  25.2 MHz  video timing, scanout, TMDS encoding
 //   clk_core 75   MHz  tracer, camera setup, animator, SDRAM, UART, control
+//                      (by default; see scripts/clock_config.py)
 
 mod video;
 mod uart;
@@ -27,7 +28,10 @@ mod harness;
 use lib::sdram::Request;
 
 #[no_mangle(all)]
-extern entity clocks(clk27: clock, clk_ser: inv bool, clk_pix: inv bool, clk_core: inv bool, locked: inv bool);
+// rtl/gowin/clocks.v; the core clock and the constants that follow it are set
+// by scripts/clock_config.py.
+extern entity clocks(clk27: clock, clk_ser: inv bool, clk_pix: inv bool, clk_core: inv bool, locked: inv bool,
+                     uart_div: inv uint<16>, ref_interval: inv uint<10>, core_cmhz: inv uint<16>);
 
 #[no_mangle(all)]
 extern entity dvi_phy(
@@ -49,7 +53,6 @@ extern entity sdram_clk(clk: clock, sdram_clk: inv bool);
 #[no_mangle(all)]
 extern entity dq_capture(clk: clock, d: uint<32>, q: inv uint<32>);
 
-fn clocks_per_bit() -> uint<16> { 651 } // 75 MHz / 115200
 
 // Turns a push button into a one-cycle pulse per press. The level seen after
 // reset is taken as "released", so either button polarity works. Samples
@@ -93,7 +96,10 @@ entity top(
     let (clk_pix_b, clk_pix_inv) = port();
     let (clk_core_b, clk_core_inv) = port();
     let (locked, locked_inv) = port();
-    let _ = inst clocks(clk, clk_ser_inv, clk_pix_inv, clk_core_inv, locked_inv);
+    let (uart_div, uart_div_inv) = port();
+    let (ref_interval, ref_interval_inv) = port();
+    let (core_cmhz, core_cmhz_inv) = port();
+    let _ = inst clocks(clk, clk_ser_inv, clk_pix_inv, clk_core_inv, locked_inv, uart_div_inv, ref_interval_inv, core_cmhz_inv);
     let clk_ser = unsafe { clk_ser_b.as_clock() };
     let clk_pix = unsafe { clk_pix_b.as_clock() };
     let clk_core = unsafe { clk_core_b.as_clock() };
@@ -106,7 +112,7 @@ entity top(
     let rst_pix = inst std::cdc::sync2_bool(clk_pix, rst);
 
     // ------------------------------------------------------- UART control
-    let rx_byte = inst uart::uart_rx(clk_core, rst, uart_rx, clocks_per_bit());
+    let rx_byte = inst uart::uart_rx(clk_core, rst, uart_rx, uart_div);
     let (tx_ready, tx_ready_inv) = port();
     let (frame_tick, frame_tick_inv) = port();
     let (frames, frames_inv) = port();
@@ -114,8 +120,9 @@ entity top(
     let press_s1 = inst button(clk_core, rst, btn_s1);
     let press_s2 = inst button(clk_core, rst, btn_s2);
     let (cycles, cycles_inv) = port();
-    let ctl = inst control::control(clk_core, rst, rx_byte, tx_ready, frame_tick, press_s1, press_s2, frames, status, cycles);
-    let utx = inst uart::uart_tx(clk_core, rst, ctl.tx, clocks_per_bit());
+    let ctl = inst control::control(clk_core, rst, rx_byte, tx_ready, frame_tick, press_s1, press_s2, frames, status, cycles,
+                                    core_cmhz);
+    let utx = inst uart::uart_tx(clk_core, rst, ctl.tx, uart_div);
     set tx_ready_inv = utx.ready;
     set uart_tx = utx.tx;
     let p = ctl.params;
@@ -184,7 +191,7 @@ entity top(
     let (dq_read, dq_write) = IO_sdram_dq.read_write();
     let (dq_in, dq_in_inv) = port();
     let _ = inst dq_capture(clk_core, dq_read.unwrap_or(0), dq_in_inv);
-    let sd = inst sdram::sdram_ctrl(clk_core, rst, fb.req, wdata, dq_in, p.sdram_rd_lat);
+    let sd = inst sdram::sdram_ctrl(clk_core, rst, fb.req, wdata, dq_in, p.sdram_rd_lat, ref_interval);
     set dq_write = sd.dq;
     set sd_accept_inv = sd.accept;
     set sd_write_done_inv = sd.write_done;

@@ -62,10 +62,28 @@ GOWIN_HOME=/path/to/Gowin scripts/build.sh   # -> gowin/tn20k_raytracer/impl/pnr
 openFPGALoader -b tangnano20k gowin/tn20k_raytracer/impl/pnr/tn20k_raytracer.fs   # load to SRAM
 ```
 
+**Core clock.** The core runs at 75 MHz (place and route: 75.1 MHz fmax).
+Set another one with `CORE_MHZ`, from 25 to 100 MHz:
+
+```
+CORE_MHZ=66 scripts/build.sh prepare      # then Run All in the IDE, or:
+CORE_MHZ=66 GOWIN_HOME=/path/to/Gowin scripts/build.sh
+```
+
+`scripts/clock_config.py` picks the closest PLL setting that is not faster
+than asked for, and prints it. It writes `build/clocks.v` (the PLL) and
+`build/tangnano20k.sdc` (the timing constraint), which the Gowin project
+builds; the UART divider and SDRAM refresh interval come with them. The
+frame rate scales with the clock. `rtctl.py get core_clock` reads it back
+from the board. `CORE_MHZ` works the same for `sim/run.sh`,
+`sim/check_clocks.sh` and `scripts/build_oss.sh`.
+
 Notes on the Gowin flow:
-- **Project contents:** the project lists the generated Verilog, the Verilog
-  primitive wrappers in `rtl/`, and the pin and timing constraints
-  (`constraints/tangnano20k.cst`, `constraints/tangnano20k.sdc`). Options are
+- **Project contents:** the project lists the generated Verilog
+  (`build/spade_plain.v`, `build/clocks.v`), the Verilog primitive wrappers
+  in `rtl/`, and the pin and timing constraints (`constraints/tangnano20k.cst`,
+  `build/tangnano20k.sdc`). `rtl/gowin/clocks.v` and
+  `constraints/tangnano20k.sdc` are the templates for the generated copies. Options are
   top module `top` and SystemVerilog 2017. `gowin/create_project.tcl`
   regenerates the project.
 - **Implementation settings:** `gowin/timing_options.tcl` holds them
@@ -121,8 +139,8 @@ estimate):
 | 14,374 / 20,736 (70 %) | 6,412 / 15,552 | 35 / 46 | ≈ 44.5 / 48 | 2 / 2 | 63.3 MHz |
 
 The 75 MHz version adds pipeline registers (about 1,300 more flip-flops).
-A synthesis-only probe of it estimated the core at about 82 MHz. Your
-place-and-route report is the real figure.
+Its place and route (V1.9.12.04) meets timing: core 75.1 MHz (75 needed),
+pixel clock 76.6 MHz (25.2 needed), serial clock 380 MHz (126 needed).
 
 The multiplier count adds up 18 MULT18X18, 11 MULTADDALU18X18 and 2
 MULTALU36X18 (two multipliers each), and 1 MULT9X9. The colour products are

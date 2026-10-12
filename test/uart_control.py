@@ -73,6 +73,7 @@ async def read_write_registers(dut):
     s.o.params.cam.yaw.assert_eq("0x1a2b")
     assert await ser.query("R 2\r") == "02=1a2b\r\n"
     assert await ser.query("R 0E\r") == "0e=1234\r\n"
+    assert await ser.query("R 14\r") == "14=1d4c\r\n"  # core clock 75.00 MHz
     # fov is clamped to 1.2
     assert await ser.query("W 08 FFFF\r") == "ok\r\n"
     s.o.params.cam.fov.assert_eq("0x9999")

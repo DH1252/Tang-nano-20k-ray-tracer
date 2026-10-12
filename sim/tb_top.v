@@ -38,8 +38,9 @@ module tb;
     );
 
     // ---------------------------------------------------------------- UART
-    // The DUT divides 75 MHz by 651: one bit = 651 core clocks.
-    localparam BIT = 651 * 13334;
+    // One bit is UART_DIV core clocks (build/clock.vh, from scripts/clock_config.py).
+    `include "clock.vh"
+    localparam BIT = UART_DIV * CORE_PERIOD_PS;
 
     task send_byte(input [7:0] b);
         integer i;

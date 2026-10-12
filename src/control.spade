@@ -91,8 +91,8 @@ fn is_eol(c: uint<8>) -> bool { c == 0x0d || c == 0x0a }
 
 fn nudge(old: uint<16>, delta: int<16>) -> uint<16> { old +. delta.as_uint() }
 
-// Read-only registers live at 0x00 (ID), 0x0E (frame counter), 0x0F (status)
-// and 0x13 (cycles per frame / 256).
+// Read-only registers live at 0x00 (ID), 0x0E (frame counter), 0x0F (status),
+// 0x13 (cycles per frame / 256) and 0x14 (core clock, 10 kHz units).
 fn reg_write(addr: uint<8>, w: Option<Write>) -> Option<uint<16>> {
     match w {
         Some(w) => if w.addr == addr { Some(w.value) } else { None },
@@ -113,6 +113,7 @@ pub entity control(
     frames: uint<16>,
     status: uint<16>,
     cycles: uint<16>,
+    core_cmhz: uint<16>,
 ) -> ControlOut {
     decl parse, acc_a, acc_v;
     decl ctrl, yaw, pitch, dist, tx, ty, tz, fov, yaw_speed, light_az, light_el, light_speed, rd_lat;
@@ -271,6 +272,7 @@ pub entity control(
         0x11 => anim_speed,
         0x12 => scene,
         0x13 => cycles,
+        0x14 => core_cmhz,
         _ => 0,
     };
 

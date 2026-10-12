@@ -56,8 +56,11 @@ Python model (`model/hw.py`). Nothing has run on a board yet.
   timing, the tracer registers the inputs and outputs of the ray and shading
   units (synthesis builds their delay lines from RAM, whose outputs are
   slow), the pixel writes and the per-line cull ranges, and the projector
-  registers its per-sphere constants, box edges and divider. Synthesis
-  estimates the core at 82 MHz.
+  registers its per-sphere constants, box edges and divider, and camera
+  setup selects its operands in two stages. Place and route reaches
+  75.1 MHz. Other core clocks (25–100 MHz) are a build option:
+  `CORE_MHZ=<MHz>` runs `scripts/clock_config.py`, which sets the PLL, the
+  timing constraint, the UART divider and the SDRAM refresh interval.
 
 The RTL is in Spade rather than Verilog (§6). The sections below are the
 original plan. Where the build differs from it:

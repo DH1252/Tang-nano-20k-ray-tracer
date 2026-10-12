@@ -3,6 +3,7 @@
 // Run: sim/check_clocks.sh  (needs a Gowin install for prim_sim.v)
 `timescale 1ps/1ps
 module tb_clocks;
+    `include "clock.vh"
     reg clk27 = 0;
     always #18519 clk27 = ~clk27;   // 27 MHz
     wire clk_ser, clk_pix, clk_core, locked;
@@ -37,7 +38,7 @@ module tb_clocks;
         measure(0, "clk_ser", 126.0);
         measure(1, "clk_pix", 25.2);
         measure(3, "clk_42", 42.0);
-        measure(2, "clk_core", 75.0);
+        measure(2, "clk_core", CORE_MHZ);
         $finish;
     end
     initial begin #2000000000; $display("FAIL timeout, locked=%b", locked); $finish; end

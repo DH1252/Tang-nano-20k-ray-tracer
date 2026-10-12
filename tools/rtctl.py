@@ -75,9 +75,21 @@ def scene_dec(v):
     return f"0x{v:04x} (bounces={v & 3} floor_kr={(v >> 2) & 3}/4 spheres={min(6, (v >> 4) & 7)})"
 
 
+# Core clock in MHz, read from the board (register 0x14) before decoding
+# cycles; bitstreams without that register read 0 there, and get 75.
+core_mhz = 75.0
+
+
+def read_clock(b):
+    global core_mhz
+    v = b.read(0x14)
+    if v:
+        core_mhz = v / 100
+
+
 def cycles_dec(v):
-    ms = v * 256 / 75e3
-    return f"{v * 256} cycles = {ms:.1f} ms = {1000 / ms:.1f} fps at 75 MHz" if v else "no frame yet"
+    ms = v * 256 / (core_mhz * 1e3)
+    return f"{v * 256} cycles = {ms:.1f} ms = {1000 / ms:.1f} fps at {core_mhz:g} MHz" if v else "no frame yet"
 
 
 # name: (address, encode, decode, unit)
@@ -102,6 +114,7 @@ REGS = {
     "anim_speed": (0x11, lambda s: int(s, 0) & 0xFFFF, lambda v: f"0x{v:04x}", "per frame"),
     "scene": (0x12, lambda s: int(s, 0), scene_dec, ""),
     "cycles": (0x13, None, cycles_dec, ""),
+    "core_clock": (0x14, None, lambda v: f"{v / 100:.2f}", "MHz"),
 }
 # Fields of the scene register (0x12): name -> (shift, mask, maximum)
 SCENE = {"bounces": (0, 0x3, 3), "floor_kr": (2, 0x3, 3), "spheres": (4, 0x7, 6)}
@@ -147,6 +160,7 @@ class Board:
 
 
 def cmd_dump(b, _args):
+    read_clock(b)
     for name, (addr, _enc, dec, unit) in REGS.items():
         v = b.read(addr)
         print(f"{addr:02x} {name:13s} 0x{v:04x}  {dec(v)} {unit}".rstrip())
@@ -155,6 +169,7 @@ def cmd_dump(b, _args):
 
 
 def cmd_get(b, args):
+    read_clock(b)
     for name in args:
         if name in SCENE:
             sh, mask, _ = SCENE[name]
