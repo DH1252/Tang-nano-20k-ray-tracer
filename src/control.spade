@@ -1,0 +1,294 @@
+// Parameter registers and the UART command interpreter.
+//
+// Line commands (upper case, hex numbers, end with CR or LF):
+//   W aa vvvv    write register aa      -> "ok"
+//   R aa         read register aa       -> "aa=vvvv"
+//   anything else malformed             -> "?"
+// Single keys (lower case) act immediately and send nothing back:
+//   a/d yaw -/+    w/s pitch +/-    z/x distance -/+    j/l sun azimuth -/+
+//   i/k sun elevation +/-           o orbit on/off      p sun motion on/off
+//   f freeze frame                  t test pattern      c reset to defaults
+// See docs/uart-protocol.md for the register map.
+
+use lib::camera::CamParams;
+
+pub struct Params {
+    cam: CamParams,
+    orbit: bool,
+    light_auto: bool,
+    freeze: bool,
+    test_pattern: bool,
+    sdram_rd_lat: uint<3>,
+}
+
+pub struct ControlOut {
+    params: Params,
+    tx: Option<uint<8>>,
+    // Pulses on every received byte, for an activity LED.
+    rx_activity: bool,
+}
+
+// Defaults, also used by the `c` key.
+fn d_ctrl() -> uint<16> { 0x0003 }
+fn d_yaw() -> uint<16> { 0x0000 }
+fn d_pitch() -> uint<16> { 0x0700 }
+fn d_dist() -> uint<16> { 0x6000 }
+fn d_ty() -> uint<16> { 0x0CCD }
+fn d_fov() -> uint<16> { 0x49E7 }
+fn d_yaw_speed() -> uint<16> { 0x0020 }
+fn d_light_az() -> uint<16> { 0x9000 }
+fn d_light_el() -> uint<16> { 0x0900 }
+fn d_light_speed() -> uint<16> { 0x0010 }
+fn d_rd_lat() -> uint<16> { 4 }
+
+fn fov_max() -> uint<16> { 0x9999 } // tan(hfov/2) <= 1.2 keeps |ray| < 2
+
+fn hex_value(c: uint<8>) -> Option<uint<4>> {
+    if c >= 0x30 && c <= 0x39 {
+        Some(trunc(c - 0x30))
+    } else if c >= 0x41 && c <= 0x46 {
+        Some(trunc(c - 0x37))
+    } else if c >= 0x61 && c <= 0x66 {
+        Some(trunc(c - 0x57))
+    } else {
+        None
+    }
+}
+
+fn hex_char(n: uint<4>) -> uint<8> {
+    if n < 10 { zext(n) +. 0x30u8 } else { zext(n) +. 0x57u8 }
+}
+
+enum Parse {
+    Idle,
+    // Collecting the register address. `digits` is true once a hex digit arrived.
+    Addr{write: bool, digits: bool},
+    Value,
+}
+
+enum Reply {
+    Ok,
+    Err,
+    Read{addr: uint<8>, value: uint<16>},
+}
+
+struct Write {
+    addr: uint<8>,
+    value: uint<16>,
+}
+
+fn is_eol(c: uint<8>) -> bool { c == 0x0d || c == 0x0a }
+
+fn nudge(old: uint<16>, delta: int<16>) -> uint<16> { old +. delta.as_uint() }
+
+// Read-only registers live at 0x00 (ID), 0x0E (frame counter), 0x0F (status).
+fn reg_write(addr: uint<8>, w: Option<Write>) -> Option<uint<16>> {
+    match w {
+        Some(w) => if w.addr == addr { Some(w.value) } else { None },
+        None => None,
+    }
+}
+
+pub entity control(
+    clk: clock,
+    rst: bool,
+    rx: Option<uint<8>>,
+    tx_ready: bool,
+    // Pulses when the renderer starts a frame: advances auto motion.
+    frame_tick: bool,
+    // Button presses (single-cycle pulses).
+    toggle_orbit: bool,
+    toggle_light: bool,
+    frames: uint<16>,
+    status: uint<16>,
+) -> ControlOut {
+    decl parse, acc_a, acc_v;
+    decl ctrl, yaw, pitch, dist, tx, ty, tz, fov, yaw_speed, light_az, light_el, light_speed, rd_lat;
+
+    // ---------------------------------------------------------------- parser
+    let (parse_n, acc_a_n, acc_v_n, cmd, reply, key): (Parse, uint<8>, uint<16>, Option<Write>, Option<Reply>, Option<uint<8>>) = match rx {
+        None => (parse, acc_a, acc_v, None, None, None),
+        Some(c) => {
+            let hex = hex_value(c);
+            match parse {
+                Parse::Idle => {
+                    if c == 0x57 {
+                        (Parse::Addr(true, false), 0, 0, None, None, None)
+                    } else if c == 0x52 {
+                        (Parse::Addr(false, false), 0, 0, None, None, None)
+                    } else {
+                        (Parse::Idle, acc_a, acc_v, None, None, Some(c))
+                    }
+                },
+                Parse::Addr(write, digits) => match hex {
+                    Some(h) => (Parse::Addr(write, true), trunc(acc_a.concat(h)), acc_v, None, None, None),
+                    None => if c == 0x20 {
+                        if digits && write { (Parse::Value, acc_a, acc_v, None, None, None) }
+                        else { (parse, acc_a, acc_v, None, None, None) }
+                    } else if is_eol(c) && digits && !write {
+                        (Parse::Idle, acc_a, acc_v, None, Some(Reply::Read(acc_a, 0)), None)
+                    } else {
+                        (Parse::Idle, acc_a, acc_v, None, Some(Reply::Err), None)
+                    },
+                },
+                Parse::Value => match hex {
+                    Some(h) => (Parse::Value, acc_a, trunc(acc_v.concat(h)), None, None, None),
+                    None => if c == 0x20 {
+                        (Parse::Value, acc_a, acc_v, None, None, None)
+                    } else if is_eol(c) {
+                        (Parse::Idle, acc_a, acc_v, Some(Write$(addr: acc_a, value: acc_v)), Some(Reply::Ok), None)
+                    } else {
+                        (Parse::Idle, acc_a, acc_v, None, Some(Reply::Err), None)
+                    },
+                },
+            }
+        },
+    };
+    reg(clk) parse reset(rst: Parse::Idle) = parse_n;
+    reg(clk) acc_a: uint<8> reset(rst: 0) = acc_a_n;
+    reg(clk) acc_v: uint<16> reset(rst: 0) = acc_v_n;
+
+    // ------------------------------------------------------------ key nudges
+    // Keys become register writes so there is a single write path.
+    let defaults = key == Some(0x63);
+    let key_write: Option<Write> = match key {
+        Some(0x61) => Some(Write$(addr: 0x02, value: nudge(yaw, -0x0200))),
+        Some(0x64) => Some(Write$(addr: 0x02, value: nudge(yaw, 0x0200))),
+        Some(0x77) => Some(Write$(addr: 0x03, value: nudge(pitch, 0x0100))),
+        Some(0x73) => Some(Write$(addr: 0x03, value: nudge(pitch, -0x0100))),
+        Some(0x7a) => Some(Write$(addr: 0x04, value: nudge(dist, -0x0400))),
+        Some(0x78) => Some(Write$(addr: 0x04, value: nudge(dist, 0x0400))),
+        Some(0x6a) => Some(Write$(addr: 0x0A, value: nudge(light_az, -0x0400))),
+        Some(0x6c) => Some(Write$(addr: 0x0A, value: nudge(light_az, 0x0400))),
+        Some(0x69) => Some(Write$(addr: 0x0B, value: nudge(light_el, 0x0200))),
+        Some(0x6b) => Some(Write$(addr: 0x0B, value: nudge(light_el, -0x0200))),
+        Some(0x6f) => Some(Write$(addr: 0x01, value: ctrl ^ 0x0001)),
+        Some(0x70) => Some(Write$(addr: 0x01, value: ctrl ^ 0x0002)),
+        Some(0x66) => Some(Write$(addr: 0x01, value: ctrl ^ 0x0004)),
+        Some(0x74) => Some(Write$(addr: 0x01, value: ctrl ^ 0x0008)),
+        _ => if toggle_orbit {
+            Some(Write$(addr: 0x01, value: ctrl ^ 0x0001))
+        } else if toggle_light {
+            Some(Write$(addr: 0x01, value: ctrl ^ 0x0002))
+        } else {
+            None
+        },
+    };
+    let w = match cmd { Some(c) => Some(c), None => key_write };
+
+    // -------------------------------------------------------------- registers
+    let orbit_on = (ctrl & 1) != 0;
+    let light_on = (ctrl & 2) != 0;
+
+    reg(clk) ctrl: uint<16> reset(rst: d_ctrl()) =
+        if defaults { d_ctrl() } else { reg_write(0x01, w).unwrap_or(ctrl) };
+    reg(clk) yaw: uint<16> reset(rst: d_yaw()) =
+        if defaults { d_yaw() }
+        else { match reg_write(0x02, w) {
+            Some(v) => v,
+            None => if frame_tick && orbit_on { yaw +. yaw_speed } else { yaw },
+        } };
+    reg(clk) pitch: uint<16> reset(rst: d_pitch()) =
+        if defaults { d_pitch() } else { reg_write(0x03, w).unwrap_or(pitch) };
+    reg(clk) dist: uint<16> reset(rst: d_dist()) =
+        if defaults { d_dist() } else { reg_write(0x04, w).unwrap_or(dist) };
+    reg(clk) tx: uint<16> reset(rst: 0) =
+        if defaults { 0 } else { reg_write(0x05, w).unwrap_or(tx) };
+    reg(clk) ty: uint<16> reset(rst: d_ty()) =
+        if defaults { d_ty() } else { reg_write(0x06, w).unwrap_or(ty) };
+    reg(clk) tz: uint<16> reset(rst: 0) =
+        if defaults { 0 } else { reg_write(0x07, w).unwrap_or(tz) };
+    reg(clk) fov: uint<16> reset(rst: d_fov()) =
+        if defaults { d_fov() }
+        else { match reg_write(0x08, w) {
+            Some(v) => if v > fov_max() { fov_max() } else { v },
+            None => fov,
+        } };
+    reg(clk) yaw_speed: uint<16> reset(rst: d_yaw_speed()) =
+        if defaults { d_yaw_speed() } else { reg_write(0x09, w).unwrap_or(yaw_speed) };
+    reg(clk) light_az: uint<16> reset(rst: d_light_az()) =
+        if defaults { d_light_az() }
+        else { match reg_write(0x0A, w) {
+            Some(v) => v,
+            None => if frame_tick && light_on { light_az +. light_speed } else { light_az },
+        } };
+    reg(clk) light_el: uint<16> reset(rst: d_light_el()) =
+        if defaults { d_light_el() } else { reg_write(0x0B, w).unwrap_or(light_el) };
+    reg(clk) light_speed: uint<16> reset(rst: d_light_speed()) =
+        if defaults { d_light_speed() } else { reg_write(0x0C, w).unwrap_or(light_speed) };
+    reg(clk) rd_lat: uint<16> reset(rst: d_rd_lat()) =
+        if defaults { d_rd_lat() } else { reg_write(0x0D, w).unwrap_or(rd_lat) };
+
+    // ----------------------------------------------------------------- reply
+    let read_back: uint<16> = match acc_a {
+        0x00 => 0x5254,
+        0x01 => ctrl,
+        0x02 => yaw,
+        0x03 => pitch,
+        0x04 => dist,
+        0x05 => tx,
+        0x06 => ty,
+        0x07 => tz,
+        0x08 => fov,
+        0x09 => yaw_speed,
+        0x0A => light_az,
+        0x0B => light_el,
+        0x0C => light_speed,
+        0x0D => rd_lat,
+        0x0E => frames,
+        0x0F => status,
+        _ => 0,
+    };
+
+    // Message buffer, sent oldest byte first: up to 9 bytes "aa=vvvv\r\n".
+    decl msg, msg_len;
+    let a_hi: uint<4> = trunc(acc_a >> 4);
+    let a_lo: uint<4> = trunc(acc_a);
+    let v3: uint<4> = trunc(read_back >> 12);
+    let v2: uint<4> = trunc(read_back >> 8);
+    let v1: uint<4> = trunc(read_back >> 4);
+    let v0: uint<4> = trunc(read_back);
+    let sending = msg_len != 0;
+    let send_now = sending && tx_ready;
+    let (msg_n, len_n): ([uint<8>; 9], uint<4>) = match (reply, sending) {
+        // A new reply replaces nothing while a message is still going out.
+        (Some(Reply::Ok), false) => ([0x6f, 0x6b, 0x0d, 0x0a, 0, 0, 0, 0, 0], 4),
+        (Some(Reply::Err), false) => ([0x3f, 0x0d, 0x0a, 0, 0, 0, 0, 0, 0], 3),
+        (Some(Reply::Read(_, _)), false) => (
+            [hex_char(a_hi), hex_char(a_lo), 0x3d, hex_char(v3), hex_char(v2), hex_char(v1), hex_char(v0), 0x0d, 0x0a],
+            9,
+        ),
+        _ => if send_now {
+            ([msg[1], msg[2], msg[3], msg[4], msg[5], msg[6], msg[7], msg[8], 0], trunc(msg_len - 1))
+        } else {
+            (msg, msg_len)
+        },
+    };
+    reg(clk) msg: [uint<8>; 9] reset(rst: [0; 9]) = msg_n;
+    reg(clk) msg_len: uint<4> reset(rst: 0) = len_n;
+
+    let params = Params$(
+        cam: CamParams$(
+            yaw: yaw,
+            pitch: pitch,
+            dist: dist,
+            tx: tx.as_int(),
+            ty: ty.as_int(),
+            tz: tz.as_int(),
+            fov: fov,
+            light_az: light_az,
+            light_el: light_el,
+        ),
+        orbit: orbit_on,
+        light_auto: light_on,
+        freeze: (ctrl & 4) != 0,
+        test_pattern: (ctrl & 8) != 0,
+        sdram_rd_lat: trunc(rd_lat),
+    );
+
+    ControlOut$(
+        params: params,
+        tx: if send_now { Some(msg[0]) } else { None },
+        rx_activity: rx.is_some(),
+    )
+}

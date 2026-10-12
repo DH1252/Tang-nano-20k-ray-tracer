@@ -1,0 +1,72 @@
+// 8N1 UART. `clocks_per_bit` is the clock frequency divided by the baud rate
+// (54 MHz / 115200 = 469).
+
+enum RxState {
+    Idle,
+    Start,
+    Data{bit: uint<3>},
+    Stop,
+}
+
+pub entity uart_rx(clk: clock, rst: bool, rx_async: bool, clocks_per_bit: uint<16>) -> Option<uint<8>> {
+    let rx = inst std::cdc::sync2_bool(clk, rx_async);
+
+    decl state, count;
+    let tick = count == 0;
+    let half: uint<16> = clocks_per_bit >> 1;
+    let full: uint<16> = trunc(clocks_per_bit - 1);
+
+    reg(clk) state reset(rst: RxState::Idle) = match state {
+        RxState::Idle => if !rx { RxState::Start } else { RxState::Idle },
+        RxState::Start => if tick { if !rx { RxState::Data(0) } else { RxState::Idle } } else { state },
+        RxState::Data(bit) => if tick { if bit == 7 { RxState::Stop } else { RxState::Data(trunc(bit + 1)) } } else { state },
+        RxState::Stop => if tick { RxState::Idle } else { state },
+    };
+
+    reg(clk) count: uint<16> reset(rst: 0) = match state {
+        RxState::Idle => half,
+        _ => if tick { full } else { trunc(count - 1) },
+    };
+
+    reg(clk) shift: uint<8> reset(rst: 0) = match state {
+        RxState::Data(_) => if tick { (if rx { 0x80u8 } else { 0u8 }) | (shift >> 1) } else { shift },
+        _ => shift,
+    };
+
+    reg(clk) out reset(rst: None) = match state {
+        RxState::Stop => if tick && rx { Some(shift) } else { None },
+        _ => None,
+    };
+    out
+}
+
+pub struct UartTx {
+    tx: bool,
+    // High when a new byte will be accepted this cycle.
+    ready: bool,
+}
+
+pub entity uart_tx(clk: clock, rst: bool, data: Option<uint<8>>, clocks_per_bit: uint<16>) -> UartTx {
+    // Frame = start bit, 8 data bits LSB first, stop bit. `bits_left` counts
+    // remaining bit periods; the frame is shifted out of `frame`.
+    decl bits_left, count, frame;
+    let idle = bits_left == 0;
+    let tick = count == 0;
+    let full: uint<16> = trunc(clocks_per_bit - 1);
+    let frame_shifted: uint<9> = trunc(frame >> 1);
+
+    let (bits_left_n, frame_n, count_n): (uint<4>, uint<10>, uint<16>) = match (idle, data) {
+        (true, Some(d)) => (10, 1u1.concat(d).concat(0u1), full),
+        (true, None) => (0, 0x3ff, 0),
+        (false, _) => if tick {
+            (trunc(bits_left - 1), 1u1.concat(frame_shifted), full)
+        } else {
+            (bits_left, frame, trunc(count - 1))
+        },
+    };
+    reg(clk) bits_left: uint<4> reset(rst: 0) = bits_left_n;
+    reg(clk) frame: uint<10> reset(rst: 0x3ff) = frame_n;
+    reg(clk) count: uint<16> reset(rst: 0) = count_n;
+
+    UartTx$(tx: idle || frame.as_bits()[0], ready: idle)
+}

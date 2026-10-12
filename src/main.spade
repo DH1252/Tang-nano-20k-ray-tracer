@@ -1,0 +1,212 @@
+// Tang Nano 20K ray tracer: top level.
+//
+// HDMI (DVI 640x480@60) shows a double-buffered 320x240 framebuffer kept in
+// the GW2AR-18's embedded SDRAM. The renderer draws a sky / sun / floor scene
+// whose camera and sun move under UART control (115200 8N1, see
+// docs/uart-protocol.md) or on their own. Clock domains:
+//   clk_pix  25.2 MHz  video timing, scanout, TMDS encoding
+//   clk_core 54   MHz  renderer, camera setup, SDRAM, UART, control
+
+mod video;
+mod uart;
+mod tables;
+mod sfu;
+mod camera;
+mod control;
+mod sdram;
+mod framebuffer;
+mod render;
+mod harness;
+
+use lib::sdram::Request;
+
+#[no_mangle(all)]
+extern entity clocks(clk27: clock, clk_ser: inv bool, clk_pix: inv bool, clk_core: inv bool, locked: inv bool);
+
+#[no_mangle(all)]
+extern entity dvi_phy(
+    clk_pix: clock,
+    clk_ser: clock,
+    rst: bool,
+    ch0: uint<10>,
+    ch1: uint<10>,
+    ch2: uint<10>,
+    tmds_clk_p: inv bool,
+    tmds_clk_n: inv bool,
+    tmds_d_p: inv uint<3>,
+    tmds_d_n: inv uint<3>,
+);
+
+#[no_mangle(all)]
+extern entity sdram_clk(clk: clock, sdram_clk: inv bool);
+
+#[no_mangle(all)]
+extern entity dq_capture(clk: clock, d: uint<32>, q: inv uint<32>);
+
+fn clocks_per_bit() -> uint<16> { 469 } // 54 MHz / 115200
+
+// Turns a push button into a one-cycle pulse per press. The level seen after
+// reset is taken as "released", so either button polarity works. Samples
+// every 2^16 cycles (1.2 ms) for debouncing.
+entity button(clk: clock, rst: bool, pin: bool) -> bool {
+    let level = inst std::cdc::sync2_bool(clk, pin);
+    reg(clk) div: uint<16> reset(rst: 0) = div +. 1;
+    let sample = div == 0;
+    reg(clk) (known, idle) reset(rst: (false, false)) =
+        if !known && sample { (true, level) } else { (known, idle) };
+    reg(clk) stable reset(rst: false) = if sample { level } else { stable };
+    reg(clk) prev reset(rst: false) = stable;
+    known && stable != idle && prev == idle && stable != prev
+}
+
+#[no_mangle]
+entity top(
+    #[no_mangle] clk: clock,
+    #[no_mangle] btn_s1: bool,
+    #[no_mangle] btn_s2: bool,
+    #[no_mangle] uart_rx: bool,
+    #[no_mangle] uart_tx: inv bool,
+    #[no_mangle] led: inv uint<6>,
+    #[no_mangle] tmds_clk_p: inv bool,
+    #[no_mangle] tmds_clk_n: inv bool,
+    #[no_mangle] tmds_d_p: inv uint<3>,
+    #[no_mangle] tmds_d_n: inv uint<3>,
+    #[no_mangle] O_sdram_clk: inv bool,
+    #[no_mangle] O_sdram_cke: inv bool,
+    #[no_mangle] O_sdram_cs_n: inv bool,
+    #[no_mangle] O_sdram_cas_n: inv bool,
+    #[no_mangle] O_sdram_ras_n: inv bool,
+    #[no_mangle] O_sdram_wen_n: inv bool,
+    #[no_mangle] O_sdram_dqm: inv uint<4>,
+    #[no_mangle] O_sdram_addr: inv uint<11>,
+    #[no_mangle] O_sdram_ba: inv uint<2>,
+    #[no_mangle] IO_sdram_dq: inout<uint<32>>,
+) {
+    // ------------------------------------------------------------ clocks
+    let (clk_ser_b, clk_ser_inv) = port();
+    let (clk_pix_b, clk_pix_inv) = port();
+    let (clk_core_b, clk_core_inv) = port();
+    let (locked, locked_inv) = port();
+    let _ = inst clocks(clk, clk_ser_inv, clk_pix_inv, clk_core_inv, locked_inv);
+    let clk_ser = unsafe { clk_ser_b.as_clock() };
+    let clk_pix = unsafe { clk_pix_b.as_clock() };
+    let clk_core = unsafe { clk_core_b.as_clock() };
+
+    // Resets: held until the PLLs lock, then released after 255 cycles.
+    let locked_core = inst std::cdc::sync2_bool(clk_core, locked);
+    reg(clk_core) rst_count: uint<8> initial(0) =
+        if !locked_core { 0 } else if rst_count == 255 { 255 } else { trunc(rst_count + 1) };
+    let rst = rst_count != 255;
+    let rst_pix = inst std::cdc::sync2_bool(clk_pix, rst);
+
+    // ------------------------------------------------------- UART control
+    let rx_byte = inst uart::uart_rx(clk_core, rst, uart_rx, clocks_per_bit());
+    let (tx_ready, tx_ready_inv) = port();
+    let (frame_tick, frame_tick_inv) = port();
+    let (frames, frames_inv) = port();
+    let (status, status_inv) = port();
+    let press_s1 = inst button(clk_core, rst, btn_s1);
+    let press_s2 = inst button(clk_core, rst, btn_s2);
+    let ctl = inst control::control(clk_core, rst, rx_byte, tx_ready, frame_tick, press_s1, press_s2, frames, status);
+    let utx = inst uart::uart_tx(clk_core, rst, ctl.tx, clocks_per_bit());
+    set tx_ready_inv = utx.ready;
+    set uart_tx = utx.tx;
+    let p = ctl.params;
+
+    // --------------------------------------------- scanout requests (pixel)
+    let t = inst video::video_timing(clk_pix, rst_pix);
+    let even_line = !t.y.as_bits()[0];
+    let half_y: uint<9> = trunc(t.y >> 1);
+    let want: Option<uint<8>> = if t.x == 0 {
+        if t.y == 524 { Some(0) }
+        else if t.y < 478 && even_line { Some(trunc(half_y + 1)) }
+        else { None }
+    } else {
+        None
+    };
+    reg(clk_pix) req_toggle reset(rst_pix: false) = if want.is_some() { !req_toggle } else { req_toggle };
+    reg(clk_pix) req_line: uint<8> reset(rst_pix: 0) = match want { Some(l) => l, None => req_line };
+
+    // The line number is stable for two display lines around each toggle,
+    // so it can be sampled once the toggle has been synchronised.
+    let tog = inst std::cdc::sync2_bool(clk_core, req_toggle);
+    reg(clk_core) tog_d reset(rst: false) = tog;
+    let scan_req = if tog != tog_d { Some(req_line) } else { None };
+
+    // -------------------------------------------------- SDRAM + framebuffer
+    let (sd_accept, sd_accept_inv) = port();
+    let (sd_write_done, sd_write_done_inv) = port();
+    let (sd_fill, sd_fill_inv) = port();
+    let (line_done, line_done_inv) = port();
+    let (frame_begin, frame_begin_inv) = port();
+    let fb = inst framebuffer::framebuffer(
+        clk_core, rst, scan_req, line_done, frame_begin, sd_accept, sd_write_done, sd_fill);
+
+    let (buf_write, buf_write_inv) = port();
+    let (wbuf_addr, wbuf_addr_inv) = port();
+    let wdata = inst framebuffer::line_ram(clk_core, buf_write, clk_core, fb.wbuf_slot.concat(wbuf_addr));
+
+    let (dq_read, dq_write) = IO_sdram_dq.read_write();
+    let (dq_in, dq_in_inv) = port();
+    let _ = inst dq_capture(clk_core, dq_read.unwrap_or(0), dq_in_inv);
+    let sd = inst sdram::sdram_ctrl(clk_core, rst, fb.req, wdata, dq_in, p.sdram_rd_lat);
+    set dq_write = sd.dq;
+    set sd_accept_inv = sd.accept;
+    set sd_write_done_inv = sd.write_done;
+    set sd_fill_inv = sd.fill;
+    set wbuf_addr_inv = sd.wbuf_addr;
+    let _ = inst sdram_clk(clk_core, O_sdram_clk);
+    set O_sdram_cke = sd.pins.cke;
+    set O_sdram_cs_n = sd.pins.cs_n;
+    set O_sdram_ras_n = sd.pins.ras_n;
+    set O_sdram_cas_n = sd.pins.cas_n;
+    set O_sdram_wen_n = sd.pins.we_n;
+    set O_sdram_dqm = sd.pins.dqm;
+    set O_sdram_addr = sd.pins.addr;
+    set O_sdram_ba = sd.pins.ba;
+
+    // ------------------------------------------------- camera + renderer
+    let (cam_start, cam_start_inv) = port();
+    let cam = inst camera::camera_setup(clk_core, rst, cam_start, p.cam);
+    let r = inst render::renderer(
+        clk_core, rst, fb.may_start && sd.ready, p.freeze, p.test_pattern, cam.out, cam.done, fb.slot_free);
+    set cam_start_inv = r.cam_start;
+    set frame_tick_inv = r.frame_tick;
+    set frame_begin_inv = r.frame_begin;
+    set buf_write_inv = r.buf_write;
+    set line_done_inv = r.line_done;
+
+    reg(clk_core) frame_count: uint<16> reset(rst: 0) = if r.frame_begin { frame_count +. 1 } else { frame_count };
+    set frames_inv = frame_count;
+    set status_inv = (if sd.ready { 1u16 } else { 0u16 }) | (if fb.front { 2u16 } else { 0u16 });
+
+    // ---------------------------------------------------- scanout (pixel)
+    let slot: uint<1> = trunc(t.y >> 1);
+    let word: uint<8> = trunc(t.x >> 2);
+    let pair = inst framebuffer::line_ram(clk_core, fb.scan_write, clk_pix, slot.concat(word));
+    // Delay timing by the one-cycle line RAM read.
+    reg(clk_pix) t_d = t;
+    reg(clk_pix) half_d = t.x.as_bits()[1];
+    let px: uint<16> = if half_d { trunc(pair >> 16) } else { trunc(pair) };
+    let (red, green, blue) = video::rgb565_to_888(px);
+    let ctrl0: uint<2> = (if t_d.vsync { 2u2 } else { 0u2 }) | (if t_d.hsync { 1u2 } else { 0u2 });
+    let ch0 = inst video::tmds_encoder(clk_pix, rst_pix, blue, ctrl0, t_d.active);
+    let ch1 = inst video::tmds_encoder(clk_pix, rst_pix, green, 0, t_d.active);
+    let ch2 = inst video::tmds_encoder(clk_pix, rst_pix, red, 0, t_d.active);
+    let _ = inst dvi_phy(clk_pix, clk_ser, rst_pix, ch0, ch1, ch2, tmds_clk_p, tmds_clk_n, tmds_d_p, tmds_d_n);
+
+    // --------------------------------------------------------------- LEDs
+    // Active low: heartbeat (frame counter), SDRAM ready, orbit, sun motion,
+    // UART activity, freeze.
+    reg(clk_core) rx_led: uint<22> reset(rst: 0) =
+        if ctl.rx_activity { 0x3fffff } else if rx_led == 0 { 0 } else { trunc(rx_led - 1) };
+    let on: [bool; 6] = [
+        frame_count.as_bits()[5],
+        sd.ready,
+        p.orbit,
+        p.light_auto,
+        rx_led != 0,
+        p.freeze,
+    ];
+    set led = [!on[0], !on[1], !on[2], !on[3], !on[4], !on[5]].as_uint();
+}

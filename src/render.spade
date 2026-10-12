@@ -1,0 +1,315 @@
+// Per-pixel ray renderer: sky, sun and a checkerboard floor.
+//
+// This is the first visible user of the camera, light and framebuffer path.
+// Each pixel's ray d = d0 + x dU + y dV comes from incremental adders, is
+// normalised with the shared rsqrt unit, and is intersected with the floor
+// plane y = 0 using a reciprocal from a second rsqrt unit. The floor is lit
+// by the sun (Lambert + a Phong glint from the mirrored ray) and fogs into the
+// horizon; the sky is a gradient with a sun disc. One pixel per clock.
+//
+// model/hw.py `shade_pixel` is the bit-exact reference for this file.
+
+use lib::camera::CamOut;
+use lib::sfu::rsqrt;
+use lib::tables::pow_rom;
+use lib::tables::sun_rom;
+
+pub struct Pixel {
+    x: uint<9>,
+    y: uint<8>,
+    slot: uint<1>,
+    d: [int<28>; 3],
+}
+
+pub struct Shaded {
+    x: uint<9>,
+    y: uint<8>,
+    slot: uint<1>,
+    rgb: uint<16>,
+}
+
+pub struct FrameConsts {
+    eye: [int<18>; 3],
+    light: [int<18>; 3],
+    test_pattern: bool,
+}
+
+fn sat18(v: int<40>) -> int<18> {
+    if v > 131071 { 131071 } else if v < -131071 { -131071 } else { trunc(v) }
+}
+
+fn clamp8(v: int<20>) -> uint<8> {
+    if v < 0 { 0 } else if v > 255 { 255 } else { trunc(v.as_uint()) }
+}
+
+// Shift left by s (s >= 0) or right by -s, for the small exponents the rsqrt
+// unit returns here.
+fn shift_signed(v: uint<18>, s: int<8>) -> uint<20> {
+    let w: uint<20> = zext(v);
+    if s >= 0 { w << zext(s.as_uint()) } else { w >> zext((0 -. s).as_uint()) }
+}
+
+// Table index for a dot product v (s1.16) in [0.75, 1): (v - 0.75) * 4096.
+fn dot_index(v: int<18>) -> uint<10> {
+    let t: int<18> = (v -. 49152) >>> 4;
+    if t < 0 { 0 } else if t > 1023 { 1023 } else { trunc(t.as_uint()) }
+}
+
+fn bayer4(x: uint<9>, y: uint<8>) -> uint<4> {
+    let xb: uint<2> = trunc(x);
+    let yb: uint<2> = trunc(y);
+    let row: [uint<4>; 4] = match yb {
+        0 => [0, 8, 2, 10],
+        1 => [12, 4, 14, 6],
+        2 => [3, 11, 1, 9],
+        _ => [15, 7, 13, 5],
+    };
+    row[xb]
+}
+
+fn add_sat8(v: uint<8>, a: uint<8>) -> uint<8> {
+    let s: uint<9> = v + a;
+    if s > 255 { 255 } else { trunc(s) }
+}
+
+fn umul(a: uint<16>, b: uint<16>) -> uint<32> { a * b }
+fn smul(a: int<20>, b: int<20>) -> int<40> { a * b }
+
+fn pack565(r: uint<8>, g: uint<8>, b: uint<8>) -> uint<16> {
+    let r5: uint<5> = trunc(r >> 3);
+    let g6: uint<6> = trunc(g >> 2);
+    let b5: uint<5> = trunc(b >> 3);
+    r5.concat(g6).concat(b5)
+}
+
+// Colour bars, a grey ramp and a white border, for framebuffer bring-up.
+fn test_pattern(x: uint<9>, y: uint<8>) -> uint<16> {
+    if x == 0 || x == 319 || y == 0 || y == 239 {
+        0xffff
+    } else if y < 160 {
+        let bar: uint<3> = trunc((x * 205u9) >> 13);
+        match bar {
+            0 => 0xffff,
+            1 => 0xffe0,
+            2 => 0x07ff,
+            3 => 0x07e0,
+            4 => 0xf81f,
+            5 => 0xf800,
+            6 => 0x001f,
+            _ => 0x0000,
+        }
+    } else {
+        let level: uint<8> = trunc((x * 205u9) >> 8);
+        pack565(level, level, level)
+    }
+}
+
+pub pipeline(10) shade(clk: clock, pix: Option<Pixel>, k: FrameConsts) -> Option<Shaded> {
+        // A: quantise the ray to s1.16, square it, dot it with L.
+        let p = match pix { Some(p) => p, None => Pixel$(x: 0, y: 0, slot: 0, d: [0, 0, 0]) };
+        let valid = pix.is_some();
+        let dx40: int<40> = sext(p.d[0] >>> 8);
+        let dy40: int<40> = sext(p.d[1] >>> 8);
+        let dz40: int<40> = sext(p.d[2] >>> 8);
+        let dx = sat18(dx40);
+        let dy = sat18(dy40);
+        let dz = sat18(dz40);
+        let xx: int<36> = dx * dx;
+        let yy: int<36> = dy * dy;
+        let zz: int<36> = dz * dz;
+        let lx: int<36> = dx * k.light[0];
+        let ly: int<36> = dy * k.light[1];
+        let lz: int<36> = dz * k.light[2];
+    reg;
+        // B: |d|^2 and d.L, start the two rsqrt units.
+        let xx40: int<40> = sext(xx);
+        let yy40: int<40> = sext(yy);
+        let zz40: int<40> = sext(zz);
+        let dd: int<40> = xx40 +. yy40 +. zz40;
+        let lx40: int<40> = sext(lx);
+        let ly40: int<40> = sext(ly);
+        let lz40: int<40> = sext(lz);
+        let dl = sat18((lx40 +. ly40 +. lz40) >>> 16);
+        let dy_neg: int<40> = 0 -. sext(dy);
+        let ny: int<40> = if dy < 0 { dy_neg } else { 1 };
+        let rs = inst(4) rsqrt(clk, dd.as_uint(), 32);
+        let rc = inst(4) rsqrt(clk, ny.as_uint(), 16);
+    reg * 4;
+        // F: normalised D.y and D.L; floor distance before exponent shift.
+        let half_e: int<8> = (0 -. rs.e) >>> 1;
+        let rsn: uint<20> = shift_signed(zext(rs.y1), half_e);
+        let rsn40: int<40> = zext(rsn).as_int();
+        let dy_w: int<40> = sext(dy);
+        let dl_w: int<40> = sext(dl);
+        let dy_n = sat18(trunc((dy_w * rsn40) >>> 16));
+        let dl_n = sat18(trunc((dl_w * rsn40) >>> 16));
+        let r16: uint<34> = rc.y1 * rc.y1;
+        let r16s: uint<17> = trunc(r16 >> 16);
+        let ey = k.eye[1];
+        let ey40: int<40> = sext(ey);
+        let r40: int<40> = zext(r16s).as_int();
+        let w0: int<40> = trunc((ey40 * r40) >>> 16);
+        let wshift: int<8> = 0 -. rc.e;
+    reg;
+        // G: floor distance, hit test, mirrored ray . L
+        let ws40: uint<40> = zext(wshift.as_uint());
+        let w_big: int<40> = if wshift >= 0 && wshift < 20 { w0 << ws40.as_int() } else { 0x1ffff };
+        let w: int<18> = if w_big > 0x1ffff { 0x1ffff } else if w_big < 0 { 0 } else { trunc(w_big) };
+        let hit = dy < 0 && ey > 0 && w < 0x1e000;
+        let dyn40: int<40> = sext(dy_n);
+        let ly_w: int<40> = sext(k.light[1]);
+        let dln40: int<40> = sext(dl_n);
+        let rl = sat18(dln40 -. trunc((dyn40 * ly_w) >>> 15));
+    reg;
+        // H: floor point, table lookups
+        let w40: int<40> = sext(w);
+        let dxw: int<40> = sext(dx);
+        let dzw: int<40> = sext(dz);
+        let ex24: int<24> = sext(k.eye[0]);
+        let ez24: int<24> = sext(k.eye[2]);
+        let px: int<24> = ex24 +. trunc((w40 * dxw) >>> 16);
+        let pz: int<24> = ez24 +. trunc((w40 * dzw) >>> 16);
+        let k8 = clamp8(sext(dy_n >>> 8));
+        let sun_idx = dot_index(dl_n);
+        let spec_idx = dot_index(rl);
+        let disc = dl_n >= 65500;
+        let sun8 = inst sun_rom(clk, sun_idx);
+        let spec8 = inst pow_rom(clk, spec_idx);
+        let ly_s: int<18> = k.light[1] >>> 8;
+        let ly8: uint<9> = if ly_s < 0 { 0 } else if ly_s > 256 { 256 } else { trunc(ly_s.as_uint()) };
+    reg;
+        // I: lighting, sky gradient (8-bit colour channels)
+        let checker = px.as_bits()[12] ^^ pz.as_bits()[12];
+        let wf: uint<10> = trunc(w.as_uint() >> 8);
+        let fade: uint<16> = if wf >= 256 { 0 } else { zext(256u10 -. wf) };
+        let ly16: uint<16> = zext(ly8);
+        let light: uint<16> = 96 +. trunc(umul(ly16, 160) >> 8);
+        let skyscale: uint<16> = 150 +. trunc(umul(ly16, 106) >> 8);
+        let albedo: uint<16> = if checker { 230 } else { 40 };
+        let spec_on: uint<16> = if ly8 > 0 { zext(spec8) } else { 0 };
+        let lit: uint<16> = trunc(umul(albedo, light) >> 8) +. spec_on;
+        let floor_lit: uint<16> = if lit > 255 { 255 } else { lit };
+        let k8i: int<20> = zext(k8).as_int();
+        let ss: int<20> = zext(skyscale).as_int();
+        let sun_v: uint<8> = if disc { 255 } else { sun8 };
+        let sun_i: int<20> = zext(sun_v).as_int();
+        let sky_r = clamp8(trunc((smul(200 +. trunc(smul(-160, k8i) >>> 8), ss) >>> 8) +. (smul(sun_i, 255) >>> 8)));
+        let sky_g = clamp8(trunc((smul(215 +. trunc(smul(-125, k8i) >>> 8), ss) >>> 8) +. (smul(sun_i, 230) >>> 8)));
+        let sky_b = clamp8(trunc((smul(235 +. trunc(smul(-45, k8i) >>> 8), ss) >>> 8) +. (smul(sun_i, 180) >>> 8)));
+    reg;
+        // J: fog the floor into the sky colour of the same ray, dither, pack
+        let inv_fade: uint<16> = 256 -. fade;
+        let fl: uint<32> = umul(floor_lit, fade);
+        let fog_r: uint<8> = trunc((fl +. umul(zext(sky_r), inv_fade)) >> 8);
+        let fog_g: uint<8> = trunc((fl +. umul(zext(sky_g), inv_fade)) >> 8);
+        let fog_b: uint<8> = trunc((fl +. umul(zext(sky_b), inv_fade)) >> 8);
+        let (r, g, b) = if hit { (fog_r, fog_g, fog_b) } else { (sky_r, sky_g, sky_b) };
+        let dth = bayer4(p.x, p.y);
+        let d_rb: uint<8> = zext(dth >> 1);
+        let d_g: uint<8> = zext(dth >> 2);
+        let rgb = if k.test_pattern {
+            test_pattern(p.x, p.y)
+        } else {
+            pack565(add_sat8(r, d_rb), add_sat8(g, d_g), add_sat8(b, d_rb))
+        };
+    reg;
+        if valid { Some(Shaded$(x: p.x, y: p.y, slot: p.slot, rgb: rgb)) } else { None }
+}
+
+pub struct RenderOut {
+    // Pulses when a frame starts: advances auto motion (params change next cycle).
+    frame_tick: bool,
+    // Starts the camera setup (the cycle after frame_tick).
+    cam_start: bool,
+    // Tells the framebuffer a new back-buffer frame is being drawn.
+    frame_begin: bool,
+    // Write into the render line buffer: (address {slot, column}, two pixels).
+    buf_write: Option<(uint<9>, uint<32>)>,
+    // A slot holds a complete line: (slot, y).
+    line_done: Option<(uint<1>, uint<8>)>,
+}
+
+enum Gen {
+    Idle,
+    Tick,
+    Setup,
+    WaitSlot,
+    Line{x: uint<9>},
+}
+
+fn add3(a: [int<28>; 3], b: [int<28>; 3]) -> [int<28>; 3] {
+    [a[0] +. b[0], a[1] +. b[1], a[2] +. b[2]]
+}
+
+pub entity renderer(
+    clk: clock,
+    rst: bool,
+    may_start: bool,
+    freeze: bool,
+    test_pattern: bool,
+    cam: CamOut,
+    cam_done: bool,
+    slot_free: [bool; 2],
+) -> RenderOut {
+    decl state, y, slot, row, d, consts;
+
+    let start = match state { Gen::Idle => may_start && !freeze, _ => false };
+    let in_tick = match state { Gen::Tick => true, _ => false };
+    let emit = match state { Gen::Line(_) => true, _ => false };
+    let x = match state { Gen::Line(x) => x, _ => 0 };
+    let line_end = emit && x == 319;
+
+    reg(clk) state reset(rst: Gen::Idle) = match state {
+        Gen::Idle => if start { Gen::Tick } else { Gen::Idle },
+        Gen::Tick => Gen::Setup,
+        Gen::Setup => if cam_done { Gen::WaitSlot } else { Gen::Setup },
+        Gen::WaitSlot => if slot_free[slot] { Gen::Line(0) } else { Gen::WaitSlot },
+        Gen::Line(x) => if x == 319 {
+            if y == 239 { Gen::Idle } else { Gen::WaitSlot }
+        } else {
+            Gen::Line(trunc(x + 1))
+        },
+    };
+    let setup_done = match state { Gen::Setup => cam_done, _ => false };
+    reg(clk) consts reset(rst: FrameConsts$(eye: [0, 0, 0], light: [0, 0, 0], test_pattern: false)) =
+        if setup_done { FrameConsts$(eye: cam.eye, light: cam.light, test_pattern: test_pattern) } else { consts };
+    reg(clk) y: uint<8> reset(rst: 0) =
+        if setup_done { 0 } else if line_end { trunc(y + 1) } else { y };
+    reg(clk) slot: uint<1> reset(rst: 0) =
+        if setup_done { 0 } else if line_end { ~slot } else { slot };
+    reg(clk) row: [int<28>; 3] reset(rst: [0, 0, 0]) =
+        if setup_done { cam.d0 } else if line_end { add3(row, cam.dv) } else { row };
+    let line_start = match state { Gen::WaitSlot => slot_free[slot], _ => false };
+    reg(clk) d: [int<28>; 3] reset(rst: [0, 0, 0]) =
+        if line_start { row } else if emit { add3(d, cam.du) } else { d };
+
+    let pix = if emit { Some(Pixel$(x: x, y: y, slot: slot, d: d)) } else { None };
+    let shaded = inst(10) shade(clk, pix, consts);
+
+    // Pair pixels into 32-bit words: left (even) pixel in the low half.
+    reg(clk) even_px: uint<16> reset(rst: 0) = match shaded {
+        Some(s) => if !s.x.as_bits()[0] { s.rgb } else { even_px },
+        None => even_px,
+    };
+    let buf_write = match shaded {
+        Some(s) => if s.x.as_bits()[0] {
+            let col: uint<8> = trunc(s.x >> 1);
+            Some((s.slot.concat(col), s.rgb.concat(even_px)))
+        } else {
+            None
+        },
+        None => None,
+    };
+    reg(clk) line_done reset(rst: None) = match shaded {
+        Some(s) => if s.x == 319 { Some((s.slot, s.y)) } else { None },
+        None => None,
+    };
+
+    RenderOut$(
+        frame_tick: start,
+        cam_start: in_tick,
+        frame_begin: in_tick,
+        buf_write: buf_write,
+        line_done: line_done,
+    )
+}

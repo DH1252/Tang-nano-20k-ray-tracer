@@ -1,0 +1,80 @@
+// Shared special-function unit core: reciprocal square root.
+//
+// For an input X = x * 2^-fin (x > 0), it returns (y1, e) with
+//     rsqrt(X) ~= y1 * 2^-16 * 2^(-e/2)
+// where y1 is u1.16 in (0.5, 1] and e is even. Callers derive
+//     sqrt(X)  = X * rsqrt(X)
+//     1/X      = rsqrt(X)^2 = y1^2 * 2^-32 * 2^-e
+// The mantissa m (u2.16, in [1, 4)) indexes a 1024-entry table, then one
+// Newton step brings the result to ~20 bits. Latency: 4 cycles.
+
+use lib::tables::rsqrt_rom;
+
+pub struct Rsqrt {
+    y1: uint<17>,
+    e: int<8>,
+}
+
+struct Norm {
+    m: uint<18>,
+    e: int<8>,
+}
+
+// Normalise x (40 bit, treated as >= 1) so its MSB lands on bit 47 of a 48-bit
+// value, returning the shifted value and the MSB position.
+fn normalise(x: uint<40>) -> (uint<48>, uint<6>) {
+    let v0: uint<48> = zext(x);
+    let z32 = (v0 >> 16) == 0;
+    let v1: uint<48> = if z32 { v0 << 32 } else { v0 };
+    let z16 = (v1 >> 32) == 0;
+    let v2: uint<48> = if z16 { v1 << 16 } else { v1 };
+    let z8 = (v2 >> 40) == 0;
+    let v3: uint<48> = if z8 { v2 << 8 } else { v2 };
+    let z4 = (v3 >> 44) == 0;
+    let v4: uint<48> = if z4 { v3 << 4 } else { v3 };
+    let z2 = (v4 >> 46) == 0;
+    let v5: uint<48> = if z2 { v4 << 2 } else { v4 };
+    let z1 = (v5 >> 47) == 0;
+    let v6: uint<48> = if z1 { v5 << 1 } else { v5 };
+    let lz: uint<7> = (if z32 { 32u7 } else { 0u7 })
+        +. (if z16 { 16u7 } else { 0u7 })
+        +. (if z8 { 8u7 } else { 0u7 })
+        +. (if z4 { 4u7 } else { 0u7 })
+        +. (if z2 { 2u7 } else { 0u7 })
+        +. (if z1 { 1u7 } else { 0u7 });
+    // x was zero-extended by 8 bits, so MSB position = 47 - lz.
+    let msb: uint<7> = 47u7 -. lz;
+    (v6, trunc(msb))
+}
+
+fn norm(x_in: uint<40>, fin: uint<6>) -> Norm {
+    let x = if x_in == 0 { 1u40 } else { x_in };
+    let (v, msb) = normalise(x);
+    let msb_s: int<8> = zext(msb).as_int();
+    let fin_s: int<8> = zext(fin).as_int();
+    let eraw: int<8> = msb_s -. fin_s;
+    let odd = eraw.as_bits()[0];
+    // floor to even (works for negative values too)
+    let e: int<8> = eraw & -2i8;
+    let m: uint<18> = if odd { trunc(v >> 30) } else { trunc(v >> 31) };
+    Norm$(m: m, e: e)
+}
+
+pub pipeline(4) rsqrt(clk: clock, x: uint<40>, fin: uint<6>) -> Rsqrt {
+        let n = norm(x, fin);
+        let idx: uint<10> = trunc(n.m >> 8);
+        let y0 = inst rsqrt_rom(clk, idx);
+    reg;
+        let y0sq_full: uint<34> = y0 * y0;
+        let y0sq: uint<17> = trunc(y0sq_full >> 16);
+    reg;
+        let t_full: uint<35> = n.m * y0sq;
+        let t: uint<18> = trunc(t_full >> 16);
+    reg;
+        let three: uint<19> = 196608;
+        let f: uint<19> = three -. zext(t);
+        let y1_full: uint<36> = y0 * f;
+        let y1: uint<17> = trunc(y1_full >> 17);
+    reg;
+        Rsqrt$(y1: y1, e: n.e)
+}

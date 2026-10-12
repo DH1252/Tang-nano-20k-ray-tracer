@@ -1,6 +1,27 @@
 # Tang Nano 20K Ray Tracer: Project Plan
 
-Target: Sipeed Tang Nano 20K (Gowin GW2AR-LV18QN88C8/I7). Status: planning.
+Target: Sipeed Tang Nano 20K (Gowin GW2AR-LV18QN88C8/I7).
+
+## Status
+
+Built and verified in simulation, not yet tested on a board:
+
+- **M1:** 640×480@60 DVI out of the HDMI connector, with clocks, scanout and UART.
+- **M5, brought forward:** a double-buffered 320×240 RGB565 framebuffer in the
+  embedded SDRAM, with buffer swaps during vertical blanking (no tearing). It
+  replaces the block-RAM framebuffer planned for the MVP, so the 38 block RAMs
+  that framebuffer would have used stay free from the start.
+- **Camera and sun motion:** an orbit camera and a sun, set by a microcoded
+  per-frame setup unit on one shared multiplier. Both can move on their own.
+- **UART control:** register read/write commands plus single-key nudges
+  ([uart-protocol.md](uart-protocol.md)) and a host tool (`tools/rtctl.py`).
+- **First renderer:** a per-pixel ray pipeline (ray generator plus two rsqrt
+  units) drawing sky, sun and a checkerboard floor with a sun glint. It
+  exercises the camera, light and framebuffer path ahead of the sphere
+  intersection unit (M2).
+
+The RTL is in Spade rather than Verilog (§6). The sections below are the
+original plan; M2–M4 (spheres, shadows, reflections) come next.
 
 ## 1. Goal
 
@@ -347,29 +368,31 @@ target asks for.
 
 ## 6. Repository layout and toolchain
 
+The RTL is written in [Spade](https://spade-lang.org) (v0.20, pinned in
+`swim.toml`). Vendor primitives sit in thin Verilog wrappers.
+
 ```
-docs/PLAN.md             this file
-docs/img/                reference renders
-docs/utilization.md      measured LUT/FF/BSRAM/DSP and fmax per milestone (from M1)
-model/feasibility.py     fixed-point vs float model, the M0 starting point
-rtl/top.v
-rtl/video/               video timing, TMDS encoder, DVI TX, scanout
-rtl/rt/                  sequencer, ray generator, SFU, IU, SU, animator
-rtl/mem/                 BSRAM framebuffer, SDRAM controller
-rtl/prims/               Gowin primitive wrappers and behavioural sim models
-sim/                     Verilator testbenches, frame to PPM
-constraints/             tangnano20k.cst (pins from Sipeed's HDMI example), timing.sdc
-scripts/                 Gowin (gw_sh) build, open-source build
+src/*.spade              RTL: top (main), video, uart, control, camera, sfu,
+                         sdram, framebuffer, render, tables (generated), harness
+rtl/dq_capture.v         SDRAM read capture on the falling edge
+rtl/gowin/*.v            rPLL/CLKDIV clocks, OSER10 + TLVDS DVI PHY, ODDR SDRAM clock
+constraints/             tangnano20k.cst
+model/hw.py              bit-exact Python model of the RTL arithmetic
+model/feasibility.py     float vs fixed-point study for the full tracer
+test/*.py                cocotb unit tests (swim test)
+sim/                     full-system Verilator testbench, SDRAM and DVI models
+scripts/build.sh         open-source bitstream build
+scripts/gen_tables.py    generates src/tables.spade (shared with the model)
+tools/rtctl.py           host-side UART control
+docs/                    this plan, UART protocol, images
 ```
 
-- **Gowin EDA** is the primary flow for synthesis, place and route, and timing;
-  the free Education edition covers this part.
-- **Yosys + nextpnr-himbaechel (Apicula)** is the secondary flow. Check its DSP
-  and BSRAM support for GW2A before depending on it.
-- **RTL** stays in plain Verilog-2005. Vendor primitives (rPLL, CLKDIV, OSER10,
-  LVDS buffers, MULTADDALU18X18, BSRAM) sit behind thin wrappers that have
-  behavioural sim models.
-- **Verilator** for simulation.
+- **Build:** `swim build` (Spade to Verilog), then Yosys `synth_gowin`,
+  nextpnr-himbaechel and apicula's `gowin_pack` (`scripts/build.sh`). This
+  flow handles the GW2A DSPs, block RAM, PLLs, OSER10, TLVDS and the
+  embedded SDRAM pins. Gowin EDA remains an option for timing sign-off.
+- **Simulation:** cocotb + Icarus through `swim test` for units, and Verilator
+  for the full system (`sim/run.sh`).
 
 ## 7. Verification
 
@@ -393,11 +416,11 @@ scripts/                 Gowin (gw_sh) build, open-source build
 | M  | Deliverable                                                          | Exit criteria |
 |----|----------------------------------------------------------------------|---------------|
 | M0 | Bit-exact golden model, test vectors, reference images              | Renders the reference scene; all operands fit 18 bits; ≥ 35 dB against float |
-| M1 | Clocks, 640×480 DVI, BSRAM framebuffer, 2× scanout, UART            | Colour bars and a framebuffer pattern on a real monitor; first utilisation entry |
+| M1 | Clocks, 640×480 DVI, 2× scanout, UART (done in simulation; SDRAM framebuffer instead of BSRAM) | Colour bars and a framebuffer pattern on a real monitor; first utilisation entry |
 | M2 | SFU + IU in simulation, then on hardware with primary rays and a flat colour per object | Bit-exact in simulation; sphere silhouettes on screen |
 | M3 | Tier 0: MVP shading, animator, buttons                              | Animated scene at ≥ 25 fps at 54 MHz; ≤ 6.5 K LUTs |
 | M4 | Tier 1: reflections, specular, fog, extra bounces                    | Bit-exact with the model; ≥ 25 fps. **Demo complete.** |
-| M5 | SDRAM framebuffer, double-buffered RGB565                            | No tearing; 38 BSRAMs freed; 640×480 quality mode works |
+| M5 | SDRAM framebuffer, double-buffered RGB565 (done in simulation, ahead of M2) | No tearing; 38 BSRAMs freed; 640×480 quality mode works |
 | M6 | Tier 2: soft CPU with UART console, AA, textures, second light       | ≤ 75 % of LUTs; timing met |
 | M7 | Tier 3 stretch items, as the budget allows                           | Each item lands with its own utilisation entry |
 
@@ -413,4 +436,4 @@ scripts/                 Gowin (gw_sh) build, open-source build
 | Embedded SDRAM bring-up (`O_sdram_*` / `IO_sdram_dq` ports) | M5 slips | Linear bursts only (whole scanlines in and out) keep the controller simple; follow the proven open-source Tang Nano 20K controllers |
 | The single-buffered MVP shows a tear line | Cosmetic | Accept it until M5, with an optional vsync-locked 30 fps mode |
 | Read-modify-write hazard in the Hit RAM on tiny compacted batches | Wrong nearest hit | Pad secondary batches to at least 8 slots (under 0.1 % of cycles) |
-| Gaps in the open-source flow for GW2A DSP/BSRAM | Can't rely on the open-source toolchain | Gowin EDA is the primary flow |
+| Gaps in the open-source flow for GW2A | Can't rely on the open-source toolchain | It already builds this design (DSP, BSRAM, PLL, OSER10, TLVDS, SDRAM pins); Gowin EDA stays available for sign-off |

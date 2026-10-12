@@ -1,0 +1,235 @@
+// Per-frame camera and light setup.
+//
+// Turns the user parameters (orbit angles, distance, target, field of view,
+// sun azimuth/elevation) into the vectors the renderer needs:
+//
+//   eye  = target - dist * fwd                         s5.12
+//   d0   = fwd - 159.5 * dU - 119.5 * dV               s3.24  (ray of pixel 0,0)
+//   dU   = s * right,  dV = -s * up,  s = fov / 160    s3.24  (per-pixel steps)
+//   L    = (cos el sin az, sin el, cos el cos az)      s1.16  (towards the sun)
+//
+// with an orbit camera
+//   fwd   = (-sin yaw cos pitch, -sin pitch, -cos yaw cos pitch)
+//   right = ( cos yaw, 0, -sin yaw)
+//   up    = (-sin yaw sin pitch, cos pitch, -cos yaw sin pitch)
+//
+// It runs as a small microprogram on one shared multiplier, two cycles per
+// micro-op, about 80 cycles per frame. Angles are u16 fractions of a turn.
+
+use lib::tables::sin_rom;
+
+pub struct CamParams {
+    yaw: uint<16>,
+    pitch: uint<16>,
+    dist: uint<16>,     // u4.12
+    tx: int<16>,        // s3.12
+    ty: int<16>,
+    tz: int<16>,
+    fov: uint<16>,      // tan(horizontal fov / 2), u1.15
+    light_az: uint<16>,
+    light_el: uint<16>,
+}
+
+pub struct CamOut {
+    eye: [int<18>; 3],
+    d0: [int<28>; 3],
+    du: [int<28>; 3],
+    dv: [int<28>; 3],
+    light: [int<18>; 3],
+}
+
+pub struct CamResult {
+    out: CamOut,
+    // Pulses for one cycle when `out` is valid.
+    done: bool,
+}
+
+// op: 0 = end, 1 = sin/cos lookup, 2 = multiply, 3 = add
+struct Uop {
+    op: uint<2>,
+    dst: uint<5>,
+    a: uint<6>,
+    b: uint<6>,
+    sh: uint<5>,
+    neg: bool,
+}
+
+// Operand sources >= 32
+// 32 yaw, 33 pitch, 34 light_az, 35 light_el (angles, for lookups)
+// 36 dist, 37 fov, 38 tx, 39 ty, 40 tz, 41 256, 42 319, 43 239, 44 13107
+
+// sin(angle(a)) or, with neg = true, cos(angle(a))
+fn trig(dst: uint<5>, a: uint<6>, cos: bool) -> Uop { Uop$(op: 1, dst: dst, a: a, b: 0, sh: 0, neg: cos) }
+// dst = +/- (a * b) >>> sh, b must fit 18 bits signed
+fn mul(dst: uint<5>, a: uint<6>, b: uint<6>, sh: uint<5>, neg: bool) -> Uop { Uop$(op: 2, dst: dst, a: a, b: b, sh: sh, neg: neg) }
+// dst = a +/- b
+fn add(dst: uint<5>, a: uint<6>, b: uint<6>, neg: bool) -> Uop { Uop$(op: 3, dst: dst, a: a, b: b, sh: 0, neg: neg) }
+
+fn program(pc: uint<6>) -> Uop {
+    match pc {
+        // r0..r7: sin/cos of yaw, pitch, az, el (s1.16)
+        0 => trig(0, 32, false),
+        1 => trig(1, 32, true),
+        2 => trig(2, 33, false),
+        3 => trig(3, 33, true),
+        4 => trig(4, 34, false),
+        5 => trig(5, 34, true),
+        6 => trig(6, 35, false),
+        7 => trig(7, 35, true),
+        // p1 = sy cp (-fwd.x), p2 = cy cp (-fwd.z), p3 = sy sp, p4 = cy sp
+        8 => mul(8, 0, 3, 16, false),
+        9 => mul(9, 1, 3, 16, false),
+        10 => mul(10, 0, 2, 16, false),
+        11 => mul(11, 1, 2, 16, false),
+        // eye = target + dist * (p1, sp, p2)        (.12)
+        12 => mul(12, 36, 8, 16, false),
+        13 => mul(13, 36, 2, 16, false),
+        14 => mul(14, 36, 9, 16, false),
+        15 => add(12, 12, 38, false),
+        16 => add(13, 13, 39, false),
+        17 => add(14, 14, 40, false),
+        // s = fov / 160 in .24 = fov(u1.15) * 3.2
+        18 => mul(15, 37, 44, 12, false),
+        // dU = s * (cy, 0, -sy)
+        19 => mul(16, 15, 1, 16, false),
+        20 => mul(17, 15, 0, 16, true),
+        // dV = s * (p3, -cp, p4)
+        21 => mul(18, 15, 10, 16, false),
+        22 => mul(19, 15, 3, 16, true),
+        23 => mul(20, 15, 11, 16, false),
+        // d0.x = -p1 * 256 - (159.5 dU.x + 119.5 dV.x)
+        24 => mul(21, 16, 42, 1, false),
+        25 => mul(22, 18, 43, 1, false),
+        26 => add(21, 21, 22, false),
+        27 => mul(22, 8, 41, 0, true),
+        28 => add(21, 22, 21, true),
+        // d0.y = -sp * 256 - 119.5 dV.y
+        29 => mul(22, 19, 43, 1, false),
+        30 => mul(23, 2, 41, 0, true),
+        31 => add(23, 23, 22, true),
+        // d0.z = -p2 * 256 - (159.5 dU.z + 119.5 dV.z)
+        32 => mul(24, 17, 42, 1, false),
+        33 => mul(25, 20, 43, 1, false),
+        34 => add(24, 24, 25, false),
+        35 => mul(25, 9, 41, 0, true),
+        36 => add(25, 25, 24, true),
+        // L = (ce * saz, se, ce * caz)
+        37 => mul(26, 7, 4, 16, false),
+        38 => mul(27, 7, 5, 16, false),
+        _ => Uop$(op: 0, dst: 0, a: 0, b: 0, sh: 0, neg: false),
+    }
+}
+
+fn source(sel: uint<6>, r: [int<28>; 32], p: CamParams) -> int<28> {
+    if sel < 32 {
+        let idx: uint<5> = trunc(sel);
+        r[idx]
+    } else {
+        match sel {
+            36 => zext(p.dist).as_int(),
+            37 => zext(p.fov).as_int(),
+            38 => sext(p.tx),
+            39 => sext(p.ty),
+            40 => sext(p.tz),
+            41 => 256,
+            42 => 319,
+            43 => 239,
+            44 => 13107,
+            _ => 0,
+        }
+    }
+}
+
+fn angle(sel: uint<6>, p: CamParams) -> uint<16> {
+    match sel {
+        32 => p.yaw,
+        33 => p.pitch,
+        34 => p.light_az,
+        _ => p.light_el,
+    }
+}
+
+fn narrow(v: int<28>) -> int<18> { trunc(v) }
+
+enum State {
+    Idle,
+    Issue{pc: uint<6>},
+    Write{pc: uint<6>},
+}
+
+// `start` begins a new computation from `p`. Outputs hold their values until
+// the next start.
+pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> CamResult {
+    decl state, regs;
+
+    let pc = match state {
+        State::Idle => 0u6,
+        State::Issue(pc) => pc,
+        State::Write(pc) => pc,
+    };
+    let u = program(pc);
+
+    // Issue cycle: register operands and start the table lookup.
+    let a_val = source(u.a, regs, p);
+    let b_val = source(u.b, regs, p);
+    let ang: uint<16> = angle(u.a, p) +. (if u.neg { 0x4000u16 } else { 0u16 });
+    let tidx: uint<12> = trunc(ang >> 4);
+    reg(clk) sin_val = inst sin_rom(clk, tidx);
+    reg(clk) a_r = a_val;
+    reg(clk) b_r = b_val;
+
+    // Write cycle: compute and store.
+    let b_mul: int<18> = trunc(b_r);
+    let prod: int<46> = a_r * b_mul;
+    let sh46: uint<46> = zext(u.sh);
+    let prod_sh: int<28> = trunc(prod >>> sh46.as_int());
+    let mul_res: int<28> = if u.neg { 0 -. prod_sh } else { prod_sh };
+    let add_res: int<28> = if u.neg { a_r -. b_r } else { a_r +. b_r };
+    let result: int<28> = match u.op {
+        1 => sext(sin_val),
+        2 => mul_res,
+        _ => add_res,
+    };
+    let write = match state { State::Write(_) => u.op != 0, _ => false };
+
+    reg(clk) regs: [int<28>; 32] reset(rst: [0; 32]) = if write {
+        let d = u.dst;
+        [
+            if d == 0 { result } else { regs[0] }, if d == 1 { result } else { regs[1] },
+            if d == 2 { result } else { regs[2] }, if d == 3 { result } else { regs[3] },
+            if d == 4 { result } else { regs[4] }, if d == 5 { result } else { regs[5] },
+            if d == 6 { result } else { regs[6] }, if d == 7 { result } else { regs[7] },
+            if d == 8 { result } else { regs[8] }, if d == 9 { result } else { regs[9] },
+            if d == 10 { result } else { regs[10] }, if d == 11 { result } else { regs[11] },
+            if d == 12 { result } else { regs[12] }, if d == 13 { result } else { regs[13] },
+            if d == 14 { result } else { regs[14] }, if d == 15 { result } else { regs[15] },
+            if d == 16 { result } else { regs[16] }, if d == 17 { result } else { regs[17] },
+            if d == 18 { result } else { regs[18] }, if d == 19 { result } else { regs[19] },
+            if d == 20 { result } else { regs[20] }, if d == 21 { result } else { regs[21] },
+            if d == 22 { result } else { regs[22] }, if d == 23 { result } else { regs[23] },
+            if d == 24 { result } else { regs[24] }, if d == 25 { result } else { regs[25] },
+            if d == 26 { result } else { regs[26] }, if d == 27 { result } else { regs[27] },
+            if d == 28 { result } else { regs[28] }, if d == 29 { result } else { regs[29] },
+            if d == 30 { result } else { regs[30] }, if d == 31 { result } else { regs[31] },
+        ]
+    } else {
+        regs
+    };
+
+    let finished = match state { State::Write(_) => u.op == 0, _ => false };
+    reg(clk) state reset(rst: State::Idle) = match state {
+        State::Idle => if start { State::Issue(0) } else { State::Idle },
+        State::Issue(pc) => State::Write(pc),
+        State::Write(pc) => if u.op == 0 { State::Idle } else { State::Issue(trunc(pc + 1)) },
+    };
+    reg(clk) done reset(rst: false) = finished;
+
+    let out = CamOut$(
+        eye: [narrow(regs[12]), narrow(regs[13]), narrow(regs[14])],
+        d0: [regs[21], regs[23], regs[25]],
+        du: [regs[16], 0, regs[17]],
+        dv: [regs[18], regs[19], regs[20]],
+        light: [narrow(regs[26]), narrow(regs[6]), narrow(regs[27])],
+    );
+    CamResult$(out: out, done: done)
+}

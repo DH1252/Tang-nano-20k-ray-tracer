@@ -1,0 +1,213 @@
+// Controller for the GW2AR-18's embedded 64 Mbit SDR SDRAM (2M x 32:
+// 4 banks x 2048 rows x 256 columns).
+//
+// It moves whole 160-word rows (one 320-pixel RGB565 scanline per SDRAM row)
+// between the SDRAM and on-chip line buffers. Bursts use burst length 1 with
+// a READ or WRITE command on every cycle, so the column address simply counts.
+//
+// Timing is chosen for clocks up to 100 MHz (CL = 2):
+//   tRP, tRCD, tWR, tMRD = 2 cycles, tRFC = 7 cycles, refresh every 600 cycles.
+// The SDRAM clock pin is driven with the inverted controller clock, so command
+// and data outputs launched on a rising edge are sampled half a cycle later.
+// Read data is captured on the controller's falling edge (the SDRAM's own CL2
+// sampling edge, rtl/dq_capture.v) and re-registered on the rising edge, which
+// makes it available `rd_lat` = 4 cycles after the controller decides to issue
+// the READ: decide (D), command on pins (D+1), SDRAM samples mid-cycle, data
+// sampled on its CL edge 2.5 cycles later, re-registered at the start of D+4.
+// rd_lat is a runtime register so it can be tuned over the UART on hardware.
+
+pub struct Pins {
+    cs_n: bool,
+    ras_n: bool,
+    cas_n: bool,
+    we_n: bool,
+    ba: uint<2>,
+    addr: uint<11>,
+    dqm: uint<4>,
+    cke: bool,
+}
+
+pub struct Request {
+    write: bool,
+    row: uint<11>,
+}
+
+pub struct SdramOut {
+    pins: Pins,
+    dq: Option<uint<32>>,
+    // Pulses when a request is taken; the requester then drops it.
+    accept: bool,
+    // Pulses when a write transfer (and its precharge) has finished.
+    write_done: bool,
+    // Read data: (column, word). Column 159 is the last word of a row.
+    fill: Option<(uint<8>, uint<32>)>,
+    // Column of write data wanted on `wdata` in the next cycle.
+    wbuf_addr: uint<8>,
+    ready: bool,
+}
+
+// cs, ras, cas, we
+fn c_nop() -> uint<4> { 0b0111 }
+fn c_act() -> uint<4> { 0b0011 }
+fn c_read() -> uint<4> { 0b0101 }
+fn c_write() -> uint<4> { 0b0100 }
+fn c_pre() -> uint<4> { 0b0010 }
+fn c_ref() -> uint<4> { 0b0001 }
+fn c_mrs() -> uint<4> { 0b0000 }
+
+fn last_col() -> uint<8> { 159 }
+fn init_wait() -> uint<15> { 20000 }   // >= 200 us at up to 100 MHz
+fn ref_interval() -> uint<10> { 600 }  // ~11 us at 54 MHz (spec: 15.6 us)
+fn t_rfc() -> uint<3> { 7 }
+// Mode register: burst length 1, sequential, CAS latency 2, burst writes.
+fn mode_reg() -> uint<11> { 0x020 }
+
+enum State {
+    InitWait{n: uint<15>},
+    InitPre,
+    InitPreWait{n: uint<3>},
+    InitRefresh{k: uint<3>},
+    InitRefreshWait{k: uint<3>, n: uint<3>},
+    InitMode,
+    InitModeWait{n: uint<3>},
+    Idle,
+    // `n` counts down wait cycles before the next step.
+    Rcd{write: bool, n: uint<3>},
+    Burst{write: bool, col: uint<8>},
+    WriteRecover{n: uint<3>},
+    Precharge{write: bool},
+    Rp{write: bool, n: uint<3>},
+    Refresh{n: uint<3>},
+}
+
+pub entity sdram_ctrl(
+    clk: clock,
+    rst: bool,
+    req: Option<Request>,
+    wdata: uint<32>,
+    // Registered value of the DQ pins (None while the controller drives them).
+    dq_in: uint<32>,
+    rd_lat: uint<3>,
+) -> SdramOut {
+    decl state, ref_count, ready;
+
+    let ref_due = ref_count >= ref_interval();
+
+    // Each arm decides the command for the next cycle:
+    // (next state, command, address, drive DQ, accept, write done, issued read column,
+    //  latch row, refresh issued)
+    let (next, cmd, addr, drive, accept, write_done, issued_read, latch_row, did_refresh):
+        (State, uint<4>, uint<11>, bool, bool, bool, Option<uint<8>>, bool, bool) = match state {
+        State::InitWait(n) => if n == 0 {
+            (State::InitPre, c_nop(), 0, false, false, false, None, false, false)
+        } else {
+            (State::InitWait(trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+        // PRECHARGE ALL (A10 high)
+        State::InitPre => (State::InitPreWait(2), c_pre(), 0x400, false, false, false, None, false, false),
+        State::InitPreWait(n) => if n == 0 {
+            (State::InitRefresh(0), c_nop(), 0, false, false, false, None, false, false)
+        } else {
+            (State::InitPreWait(trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+        State::InitRefresh(k) => (State::InitRefreshWait(k, t_rfc()), c_ref(), 0, false, false, false, None, false, false),
+        State::InitRefreshWait(k, n) => if n != 0 {
+            (State::InitRefreshWait(k, trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        } else if k == 7 {
+            (State::InitMode, c_nop(), 0, false, false, false, None, false, false)
+        } else {
+            (State::InitRefresh(trunc(k + 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+        State::InitMode => (State::InitModeWait(2), c_mrs(), mode_reg(), false, false, false, None, false, false),
+        State::InitModeWait(n) => if n == 0 {
+            (State::Idle, c_nop(), 0, false, false, false, None, false, true)
+        } else {
+            (State::InitModeWait(trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+        State::Idle => if ref_due {
+            (State::Refresh(t_rfc()), c_ref(), 0, false, false, false, None, false, true)
+        } else {
+            match req {
+                Some(r) => (State::Rcd(r.write, 0), c_act(), r.row, false, true, false, None, true, false),
+                None => (State::Idle, c_nop(), 0, false, false, false, None, false, false),
+            }
+        },
+        State::Rcd(write, n) => if n == 0 {
+            (State::Burst(write, 0), c_nop(), 0, false, false, false, None, false, false)
+        } else {
+            (State::Rcd(write, trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+        State::Burst(write, col) => {
+            let next = if col == last_col() {
+                if write { State::WriteRecover(1) } else { State::Precharge(false) }
+            } else {
+                State::Burst(write, trunc(col + 1))
+            };
+            let cmd = if write { c_write() } else { c_read() };
+            let rd = if write { None } else { Some(col) };
+            (next, cmd, zext(col), write, false, false, rd, false, false)
+        },
+        State::WriteRecover(n) => if n == 0 {
+            (State::Precharge(true), c_nop(), 0, false, false, false, None, false, false)
+        } else {
+            (State::WriteRecover(trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+        State::Precharge(write) => (State::Rp(write, 1), c_pre(), 0, false, false, false, None, false, false),
+        State::Rp(write, n) => if n == 0 {
+            (State::Idle, c_nop(), 0, false, false, write, None, false, false)
+        } else {
+            (State::Rp(write, trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+        State::Refresh(n) => if n == 0 {
+            (State::Idle, c_nop(), 0, false, false, false, None, false, false)
+        } else {
+            (State::Refresh(trunc(n - 1)), c_nop(), 0, false, false, false, None, false, false)
+        },
+    };
+    reg(clk) state reset(rst: State::InitWait(init_wait())) = next;
+    reg(clk) ref_count: uint<10> reset(rst: 0) = if did_refresh { 0 } else if ref_due { ref_count } else { trunc(ref_count + 1) };
+    // Becomes true once initialisation finishes (the first `did_refresh` is
+    // the end of the mode register wait).
+    reg(clk) ready reset(rst: false) = ready || did_refresh;
+
+    // Registered outputs.
+    reg(clk) cmd_r: uint<4> reset(rst: 0b1111) = cmd;
+    reg(clk) addr_r: uint<11> reset(rst: 0) = addr;
+    reg(clk) dq_r: Option<uint<32>> reset(rst: None) = if drive { Some(wdata) } else { None };
+
+    // Read capture: delay the issued column to when its data is in `dq_in`.
+    reg(clk) rd_pipe: [Option<uint<8>>; 8] reset(rst: [None; 8]) =
+        [issued_read, rd_pipe[0], rd_pipe[1], rd_pipe[2], rd_pipe[3], rd_pipe[4], rd_pipe[5], rd_pipe[6]];
+    // rd_pipe[k] holds the column decided k + 1 cycles ago, so data that is in
+    // dq_in rd_lat cycles after the decision pairs with rd_pipe[rd_lat - 1].
+    let tap: uint<3> = if rd_lat == 0 { 0 } else { trunc(rd_lat - 1) };
+    let fill = match rd_pipe[tap] {
+        Some(col) => Some((col, dq_in)),
+        None => None,
+    };
+
+    let cmd_bits = cmd_r.as_bits();
+    let wbuf_addr: uint<8> = match state {
+        State::Burst(true, col) => trunc(col + 1),
+        _ => 0,
+    };
+
+    SdramOut$(
+        pins: Pins$(
+            cs_n: cmd_bits[3],
+            ras_n: cmd_bits[2],
+            cas_n: cmd_bits[1],
+            we_n: cmd_bits[0],
+            ba: 0,
+            addr: addr_r,
+            dqm: 0,
+            cke: true,
+        ),
+        dq: dq_r,
+        accept: accept,
+        write_done: write_done,
+        fill: fill,
+        wbuf_addr: wbuf_addr,
+        ready: ready,
+    )
+}
