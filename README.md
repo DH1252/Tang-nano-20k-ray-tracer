@@ -75,6 +75,18 @@ Notes on the Gowin flow:
   `PLAIN=1 sim/run.sh` simulates the rewritten file.
 - **Large constants:** Gowin rejects constants over 2^16 bits, so the sine
   table is stored as a quarter wave.
+- **NL0002 "module ... is swept in optimizing":** expected, a few hundred of
+  them. Spade emits every function as its own small Verilog module. After
+  flattening, many of those end up with no cells of their own, so Gowin
+  reports them as swept. The logic itself is still there:
+  - Conversions, concatenations, truncations and constant functions are pure
+    wiring.
+  - Some logic moves into a neighbouring cell. For example, the fog
+    multiply-adds become `MULTADDALU18X18` blocks, and each rsqrt table
+    becomes a block RAM (`pROMX9`) in the pipeline around it.
+
+  A synthesis of the renderer alone shows the expected 2 `pROMX9` (rsqrt
+  tables) and 2 `pROM` (pow and sun tables).
 
 `scripts/build_oss.sh` is the open-source alternative (Yosys, nextpnr-himbaechel,
 apicula). It produced the only full build so far:
