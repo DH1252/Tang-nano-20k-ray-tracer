@@ -9,7 +9,9 @@
 
 proc tn20k_option {name value} {
     if {[catch {set_option -$name $value} err]} {
-        puts "timing_options: -$name not supported by this Gowin release, skipped"
+        puts "timing_options: SKIPPED -$name (not supported by this Gowin release)"
+    } else {
+        puts "timing_options: set -$name $value"
     }
 }
 
