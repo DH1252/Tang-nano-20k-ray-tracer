@@ -68,24 +68,25 @@ Notes on the Gowin flow:
   (`constraints/tangnano20k.cst`, `constraints/tangnano20k.sdc`). Options are
   top module `top` and SystemVerilog 2017. `gowin/create_project.tcl`
   regenerates the project.
-- **Timing-optimised settings:** `gowin/timing_options.tcl` holds the
-  settings, taken from SUG1220-2.1E.
-  - Synthesis: `-opt_goal timing`, `-map_option 3` and `-netlist_hierarchy 0`
-    (flatten). `-map_option 4` and a lower `-max_fanout` buy more speed for
-    more LUTs, if the timing report shows the 75 MHz core clock needs it.
-  - Place and route: timing-driven, `-place_option 2`, `-route_option 1`,
-    resource replication, `-retiming_resource all`, clocks routed fastest
-    first, hold fixing, and I/O registers in the IOBs.
-  - `scripts/build.sh` applies them on every build. The committed project
+- **Implementation settings:** `gowin/timing_options.tcl` holds them
+  (option names from SUG1220-2.1E). The design fills about 70 % of the
+  logic, so they favour routability: with the timing-first algorithms, place
+  and route left thousands of nets unrouted (PR0004).
+  - Synthesis: `-opt_goal timing`, default LUT mapping (`-map_option 0`) and
+    `-netlist_hierarchy 0` (flatten).
+  - Place and route: timing-driven, `-place_option 1` (routability
+    priority), `-route_option 0` (the default router, which routes around
+    congestion), no resource replication, clocks routed fastest first, hold
+    fixing, and I/O registers in the IOBs.
+  - `scripts/build.sh` applies them on every build, and the committed project
     stores the place-and-route ones. Releases older than the 2.0E command set
     (for example V1.9.11.03) skip the newer synthesis options with a message.
-  - The committed project was created with V1.9.11.03, so it stores only the
-    place-and-route settings. Run `GOWIN_HOME=/path/to/Gowin scripts/build.sh
-    options` once, with the project closed in the IDE, to store all the
-    settings your release supports. It prints `set` or `SKIPPED` for each one
-    and lists every option the project uses in `build/gowin_options.tcl`. (In
-    the IDE's Tcl console, not a shell, `source <repo>/gowin/timing_options.tcl`
-    does the same.)
+  - Run `GOWIN_HOME=/path/to/Gowin scripts/build.sh options` once, with the
+    project closed in the IDE, to store all the settings your release
+    supports. It prints `set` or `SKIPPED` for each one and lists every
+    option the project uses in `build/gowin_options.tcl`. (In the IDE's Tcl
+    console, not a shell, `source <repo>/gowin/timing_options.tcl` does the
+    same.)
 - **Headless Linux:** `scripts/build.sh` sets `QT_QPA_PLATFORM=offscreen`, so
   no display is needed. It also preloads the system libfreetype, because some
   Gowin releases bundle one that breaks on current distributions.
