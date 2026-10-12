@@ -117,7 +117,8 @@ built from logic to leave the DSPs to the vector maths.
 
 ## Control it
 
-Open the board's serial port at 115200 baud and press keys:
+Open the board's serial port at 115200 baud, 8N1, no flow control, and press
+keys (lower case):
 
 - `a` / `d`: orbit the camera
 - `w` / `s`: raise or lower the camera
@@ -133,15 +134,40 @@ Open the board's serial port at 115200 baud and press keys:
 - `t`: test pattern
 - `c`: reset to defaults
 
-The host tool takes values in real units:
+The host tool takes values in real units. Linux or macOS:
 
 ```
 pip install pyserial
+tools/rtctl.py list                             # find the port
 tools/rtctl.py /dev/ttyUSB1 dump
 tools/rtctl.py /dev/ttyUSB1 set yaw 45 dist 4.5 fov 70 sun_el 20 orbit off
 tools/rtctl.py /dev/ttyUSB1 get cycles          # frame time and fps
-tools/rtctl.py /dev/ttyUSB1 keys
+tools/rtctl.py /dev/ttyUSB1 keys                # single keys, q or Esc quits
 ```
+
+Windows (Command Prompt or PowerShell, Python from python.org):
+
+```
+py -m pip install pyserial
+py tools\rtctl.py list                          # e.g. COM5  USB Serial Port (COM5)
+py tools\rtctl.py COM5 dump
+py tools\rtctl.py COM5 set quality on bounces 2
+py tools\rtctl.py COM5 keys
+```
+
+Notes for Windows:
+- **Finding the port.** The board's USB connector shows up as two devices:
+  JTAG for programming, and the UART. The UART is the COM port, usually the
+  higher-numbered one. Device Manager lists it under *Ports (COM & LPT)*.
+- **Missing COM port.** If you installed WinUSB with Zadig for openFPGALoader
+  and the COM port disappeared, Zadig replaced the driver on the UART
+  interface too. Give WinUSB only to interface 0 (JTAG), and put interface 1
+  back on its serial driver.
+- **One program at a time.** Only one program can hold a COM port, so close
+  PuTTY or the Gowin programmer before running `rtctl.py`.
+- **Plain terminals.** For a terminal instead of the tool, PuTTY (*Serial*,
+  115200) or Tera Term (*Setup → Serial port*, 115200, 8N1, no flow control)
+  both work for the single keys and the `W`/`R` line commands.
 
 Buttons: **S1** pauses or resumes all motion, **S2** switches the quality mode.
 

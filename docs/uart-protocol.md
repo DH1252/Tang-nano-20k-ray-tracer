@@ -1,8 +1,11 @@
 # UART control protocol
 
 The board's USB-C port carries a UART through the BL616 bridge: **115200 baud,
-8N1**. Any serial terminal works for the single-key controls. For named
-parameters in real units, use [`tools/rtctl.py`](../tools/rtctl.py).
+8N1, no flow control**. It is `/dev/ttyUSB1` on Linux and a COM port on
+Windows (`tools/rtctl.py list` shows them). Any serial terminal (PuTTY,
+Tera Term, minicom, screen) works for the single-key controls. For named
+parameters in real units, use [`tools/rtctl.py`](../tools/rtctl.py) on Linux,
+macOS or Windows. Lines may end with CR, LF or CR LF.
 
 ## Single keys
 
