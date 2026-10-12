@@ -60,7 +60,7 @@ struct Uop {
 
 // sin(angle(a)) or, with neg = true, cos(angle(a))
 fn trig(dst: uint<5>, a: uint<6>, cos: bool) -> Uop { Uop$(op: 1, dst: dst, a: a, b: 0, sh: 0, neg: cos) }
-// dst = +/- (a * b) >>> sh, b must fit 18 bits signed
+// dst = +/- (a * b) >>> sh, b must fit 18 bits signed, sh one of 0, 1, 12, 16
 fn mul(dst: uint<5>, a: uint<6>, b: uint<6>, sh: uint<5>, neg: bool) -> Uop { Uop$(op: 2, dst: dst, a: a, b: b, sh: sh, neg: neg) }
 // dst = a +/- b
 fn add(dst: uint<5>, a: uint<6>, b: uint<6>, neg: bool) -> Uop { Uop$(op: 3, dst: dst, a: a, b: b, sh: 0, neg: neg) }
@@ -163,13 +163,16 @@ enum State {
 pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> CamResult {
     decl state, regs;
 
-    let pc = match state {
+    // The micro-op of the current state, decoded one cycle ahead (from the
+    // next state's pc) so every use below starts at flip-flops.
+    decl u;
+    let next_pc = match state {
         State::Idle => 0u6,
         State::Issue(pc) => pc,
         State::Mul(pc) => pc,
-        State::Write(pc) => pc,
+        State::Write(pc) => if u.op == 0 { 0u6 } else { trunc(pc + 1) },
     };
-    let u = program(pc);
+    reg(clk) u reset(rst: Uop$(op: 1, dst: 0, a: 32, b: 0, sh: 0, neg: false)) = program(next_pc);
 
     // Issue cycle: register operands and start the table lookup.
     let a_val = source(u.a, regs, p);
@@ -194,8 +197,13 @@ pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> Cam
     reg(clk) prod: int<46> = a_r * b_mul;
 
     // Write cycle: shift, negate, store.
-    let sh46: uint<46> = zext(u.sh);
-    let prod_sh: int<28> = trunc(prod >>> sh46.as_int());
+    // The program only shifts by 0, 1, 12 or 16: a 4-way mux, not a barrel shifter.
+    let prod_sh: int<28> = match u.sh {
+        0 => trunc(prod),
+        1 => trunc(prod >>> 1),
+        12 => trunc(prod >>> 12),
+        _ => trunc(prod >>> 16),
+    };
     let mul_res: int<28> = if u.neg { 0 -. prod_sh } else { prod_sh };
     let add_res: int<28> = if u.neg { a_r -. b_r } else { a_r +. b_r };
     let result: int<28> = match u.op {
@@ -234,7 +242,7 @@ pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> Cam
         State::Idle => if start { State::Issue(0) } else { State::Idle },
         State::Issue(pc) => State::Mul(pc),
         State::Mul(pc) => State::Write(pc),
-        State::Write(pc) => if u.op == 0 { State::Idle } else { State::Issue(trunc(pc + 1)) },
+        State::Write(_) => if u.op == 0 { State::Idle } else { State::Issue(next_pc) },
     };
     reg(clk) done reset(rst: false) = finished;
 
