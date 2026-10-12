@@ -119,6 +119,7 @@ swim test        # cocotb unit tests: rsqrt unit, camera setup, UART + command p
 sim/run.sh       # full system in Verilator: SDRAM and DVI models, scripted UART session,
                  # 3 frames compared bit for bit with model/hw.py (needs Verilator 5)
 PLAIN=1 sim/run.sh   # the same on the identifier-rewritten Verilog that Gowin EDA builds
+sim/check_clocks.sh  # PLLs and dividers with Gowin's primitive models (needs GOWIN_HOME)
 ```
 
 `model/hw.py` is a bit-exact Python model of the RTL arithmetic. The tests
