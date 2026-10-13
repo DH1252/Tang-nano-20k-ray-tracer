@@ -27,6 +27,16 @@ mod harness;
 
 use lib::sdram::Request;
 
+// Everything a frame's picture depends on.
+fn frame_sig(p: control::Params) -> uint<180> {
+    let c = p.cam;
+    let scene: uint<7> = p.scene.nsph.concat(p.scene.depth).concat(p.scene.floor_kr);
+    let q: uint<1> = if p.quality { 1 } else { 0 };
+    c.yaw.concat(c.pitch).concat(c.dist).concat(c.tx.as_uint()).concat(c.ty.as_uint()).concat(c.tz.as_uint())
+        .concat(c.fov).concat(c.light_az).concat(c.light_el).concat(p.anim).concat(scene).concat(q)
+        .concat(0u12)
+}
+
 fn w18(v: int<18>) -> uint<32> { let x: int<32> = sext(v); x.as_uint() }
 fn w28(v: int<28>) -> uint<32> { let x: int<32> = sext(v); x.as_uint() }
 // {on, x0, x1} and {y0, y1} of a box
@@ -208,9 +218,10 @@ entity top(
     let (frame_begin, frame_begin_inv) = port();
     let (render_quality, render_quality_inv) = port();
     let (render_phase, render_phase_inv) = port();
+    let (render_still, render_still_inv) = port();
     let fb = inst framebuffer::framebuffer(
-        clk_core, rst, scan_req, line_done, frame_begin, render_quality, render_phase, sd_accept, sd_write_done,
-        sd_fill);
+        clk_core, rst, scan_req, line_done, frame_begin, render_quality, render_phase, render_still, sd_accept,
+        sd_write_done, sd_fill);
     set front_quality_inv = fb.front_quality;
     set front_phase_inv = fb.front_phase;
     set merge_inv = fb.merge;
@@ -258,6 +269,13 @@ entity top(
     set line_done_inv = r.line_done;
     set render_quality_inv = r.quality;
     set render_phase_inv = r.phase;
+    // A frame drawn with the same inputs as the one before it: only then do
+    // two checkerboard halves make one exact picture. While anything moves,
+    // scanout fills each missing pixel from its neighbour instead, so moving
+    // spheres do not comb and flicker.
+    reg(clk_core) last_sig: uint<180> reset(rst: 0) = if r.frame_begin { frame_sig(p) } else { last_sig };
+    reg(clk_core) still reset(rst: false) = if r.frame_begin { frame_sig(p) == last_sig } else { still };
+    set render_still_inv = still;
     set cycles_inv = trunc(r.cycles >> 8);
 
     // Debug readback (UART 0x15 selects, 0x16/0x17 read): the camera vectors

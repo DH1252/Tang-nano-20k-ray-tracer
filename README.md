@@ -214,9 +214,11 @@ Notes for Windows:
 
 Buttons: **S1** pauses or resumes all motion, **S2** switches the 640×480 mode.
 
-The checkerboard halves come from consecutive frames, so a fast-moving
-object shows a fine comb pattern along its edges while it moves. A still
-picture is exact: two frames of a still scene give the full 640×480 image.
+The two checkerboard halves are merged only when consecutive frames were
+drawn from identical inputs (camera, sun, animation, scene), and then the
+picture is the exact full 640×480 image. While anything moves, each missing
+pixel repeats its traced neighbour instead: half the horizontal detail, but
+no combing or flicker on moving spheres.
 
 LEDs, from `led[0]`:
 - `led[0]` frame heartbeat

@@ -49,6 +49,8 @@ struct Meta {
     valid: bool,
     quality: bool,
     phase: bool,
+    // Drawn with the same inputs as the frame before it.
+    still: bool,
 }
 
 fn set_meta(m: [Meta; 3], i: uint<2>, en: bool, v: Meta) -> [Meta; 3] {
@@ -65,6 +67,8 @@ pub entity framebuffer(
     // Mode and checkerboard phase of the frame being rendered (stable once it has begun).
     render_quality: bool,
     render_phase: bool,
+    // The frame being rendered has the same inputs as the previous one.
+    render_still: bool,
     accept: bool,
     write_done: bool,
     fill: Option<(uint<8>, uint<32>)>,
@@ -75,7 +79,9 @@ pub entity framebuffer(
     let rbuf = third(front, prev);
     let mf = match front { 0 => meta[0], 1 => meta[1], _ => meta[2] };
     let mp = match prev { 0 => meta[0], 1 => meta[1], _ => meta[2] };
-    let merge = mf.valid && mf.quality && mp.valid && mp.quality && mp.phase != mf.phase;
+    // Merge only two halves of the same picture: the front frame must have the
+    // same inputs as its predecessor (the previous buffer).
+    let merge = mf.valid && mf.quality && mf.still && mp.valid && mp.quality && mp.phase != mf.phase;
 
     let is_idle = match inflight { Inflight::Nothing => true, _ => false };
     let wpend_next = if next_wslot == 0 { wpend0 } else { wpend1 };
@@ -149,11 +155,11 @@ pub entity framebuffer(
         if frame_begin { true } else if frame_complete { false } else { rendering };
     reg(clk) frame_done reset(rst: false) =
         if frame_complete { true } else if swap { false } else { frame_done };
-    let no_meta = Meta$(valid: false, quality: false, phase: false);
+    let no_meta = Meta$(valid: false, quality: false, phase: false, still: false);
     // The render buffer's contents are being replaced from the frame's start.
     reg(clk) meta: [Meta; 3] reset(rst: [no_meta, no_meta, no_meta]) =
         set_meta(set_meta(meta, rbuf, frame_begin, no_meta), rbuf, frame_complete,
-                 Meta$(valid: true, quality: render_quality, phase: render_phase));
+                 Meta$(valid: true, quality: render_quality, phase: render_phase, still: render_still));
 
     let (busy0, busy1) = match inflight {
         Inflight::Write(s) => (s == 0, s == 1),
