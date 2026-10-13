@@ -16,6 +16,8 @@ Examples
   rtctl.py COM5 raw "W 02 4000"        # raw protocol line
   rtctl.py COM5 debug                  # compare the hardware's camera and boxes
                                        # with model/hw.py (stops the motion)
+  rtctl.py COM5 trig                   # sweep yaw and pitch, check the board's
+                                       # sin/cos against the model
 
 On Windows run it as `py tools\rtctl.py ...` from a Command Prompt or
 PowerShell window. Requires pyserial (pip install pyserial). See
@@ -353,7 +355,41 @@ def cmd_debug(b, _args):
     print("all match" if bad == 0 else f"{bad} mismatches")
 
 
-COMMANDS = {"dump": cmd_dump, "get": cmd_get, "set": cmd_set, "raw": cmd_raw, "keys": cmd_keys, "debug": cmd_debug}
+def cmd_trig(b, args):
+    """Sweep yaw and pitch together and compare the camera's sin/cos results:
+    fwd.y = -sin(pitch), up.y = cos(pitch), right.x = cos(yaw), right.z = -sin(yaw)."""
+    step = int(args[0], 0) if args else 0x0800
+    ctrl = b.read(0x01)
+    b.write(0x01, ctrl & ~0x17)            # no motion, not frozen: a frame renders and sets the camera
+    saved = {a: b.read(a) for a in (0x02, 0x03)}
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "model"))
+    import hw
+    words = {"sin p": 16, "cos p": 22, "cos y": 18, "sin y": 20}
+    print("angle   " + "  ".join(f"{n:>17s}" for n in words) + "   (board/model, x = wrong)")
+    try:
+        for a in list(range(0, 0x10000, step)) + [0x0700, 0x0900, 0x3F00, 0x4100, 0xAF80]:
+            b.write(0x02, a)
+            b.write(0x03, a)
+            time.sleep(0.08)                 # a few frames: the camera runs at each frame start
+            regs = {r: b.read(r) for r in (0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x10, 0x12)}
+            want, _ = expected_debug(regs)
+            got = debug_words(b, words.values())
+            cells = []
+            for n, i in words.items():
+                g, w = s32(got[i]), s32(want[i])
+                cells.append(f"{g:7d}/{w:7d}{' ' if g == w else 'x'}")
+            print(f"0x{a:04x}  " + "  ".join(cells))
+    finally:
+        for r, v in saved.items():
+            b.write(r, v)
+
+
+def s32(v):
+    return v - (1 << 32) if v & 0x80000000 else v
+
+
+COMMANDS = {"dump": cmd_dump, "get": cmd_get, "set": cmd_set, "raw": cmd_raw, "keys": cmd_keys, "debug": cmd_debug,
+            "trig": cmd_trig}
 
 
 def main(argv):
