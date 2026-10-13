@@ -8,6 +8,12 @@ Gowin flow runs the Spade output through this first. Names are mapped determinis
 `_`), with a numeric suffix whenever that would collide with another name.
 String literals and comments are left untouched.
 
+It also replaces constant bit-select indices with literals: Spade writes
+`x.as_bits()[1]` as `v[_e_N]` with `localparam[0:0] _e_N = 1;`, and Gowin EDA
+(V1.9.12.04) selects bit 0 there instead of bit 1. That flipped the sign of
+the sine lookups on hardware (camera upside down, spheres misplaced), so every
+`v[param]` becomes `v[<value>]`.
+
 usage: plain_identifiers.py IN.sv OUT.v
 """
 import re
@@ -103,7 +109,31 @@ def main():
         mapping[text] = name
         used.add(name)
     out = "".join(mapping[t] + " " if kind == "esc" else t for kind, t in parts)
-    open(sys.argv[2], "w").write(out)
+    open(sys.argv[2], "w").write(literal_indices(out))
+
+
+LOCALPARAM = re.compile(r"localparam\s*\[\s*(\d+)\s*:\s*0\s*\]\s*([A-Za-z_]\w*)\s*=\s*(-?)(?:\d+'d)?(\d+)\s*;")
+
+
+def literal_indices(src):
+    """Within each module, rewrite `name[param]` bit-selects to `name[value]`."""
+    out = []
+    pos = 0
+    for m in re.finditer(r"\bmodule\b.*?\bendmodule\b", src, re.S):
+        out.append(src[pos:m.start()])
+        body = m.group(0)
+        consts = {}
+        for d in LOCALPARAM.finditer(body):
+            width, name, neg, value = int(d.group(1)) + 1, d.group(2), d.group(3), int(d.group(4))
+            consts[name] = (-value if neg else value) % (1 << width)
+        if consts:
+            body = re.sub(r"(\b[A-Za-z_]\w*\s*)\[\s*([A-Za-z_]\w*)\s*\]",
+                          lambda b: f"{b.group(1)}[{consts[b.group(2)]}]" if b.group(2) in consts else b.group(0),
+                          body)
+        out.append(body)
+        pos = m.end()
+    out.append(src[pos:])
+    return "".join(out)
 
 
 if __name__ == "__main__":

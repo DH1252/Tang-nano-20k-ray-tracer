@@ -59,9 +59,9 @@ pub entity animator(clk: clock, rst: bool, start: bool, anim: uint<16>) -> AnimO
     let quad: uint<2> = trunc(tidx >> 10);
     let jq: uint<10> = trunc(tidx);
     let j11: uint<11> = zext(jq);
-    let qidx: uint<11> = if quad.as_bits()[0] { 1024u11 -. j11 } else { j11 };
+    let qidx: uint<11> = if quad == 1 || quad == 3 { 1024u11 -. j11 } else { j11 };
     reg(clk) mag = inst sin_rom(clk, qidx);
-    reg(clk) neg = quad.as_bits()[1];
+    reg(clk) neg = quad >= 2;
     reg(clk) step_b = step;
 
     // B: signed sine (|sin| for the bounce) times the amplitude.

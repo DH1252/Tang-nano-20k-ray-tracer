@@ -112,6 +112,14 @@ Notes on the Gowin flow:
   place and route cannot read those back from the synthesised netlist.
   `scripts/plain_identifiers.py` (run by `prepare`) rewrites them;
   `PLAIN=1 sim/run.sh` simulates the rewritten file.
+- **Constant bit indices:** Gowin EDA (V1.9.12.04) reads a bit-select whose
+  index is a 1-bit `localparam` set to 1 (Spade's `x.as_bits()[1]` on a
+  2-bit value) as bit 0. On the board that flipped the sign of the sine
+  lookups: the camera was upside down and the spheres misplaced, while the
+  simulation was right. `scripts/plain_identifiers.py` now writes every such
+  index as a literal, and the two sine lookups no longer use the construct.
+  `tools/rtctl.py PORT debug` and `trig` compare the board's camera, boxes
+  and sines with the model.
 - **Large constants:** Gowin rejects constants over 2^16 bits, so the sine
   table is stored as a quarter wave.
 - **NL0002 "module ... is swept in optimizing":** expected, a few hundred of

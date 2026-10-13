@@ -213,9 +213,9 @@ pub entity camera_setup(clk: clock, rst: bool, start: bool, p: CamParams) -> Cam
     let quad: uint<2> = trunc(tidx >> 10);
     let j: uint<10> = trunc(tidx);
     let j11: uint<11> = zext(j);
-    let qidx: uint<11> = if quad.as_bits()[0] { 1024u11 -. j11 } else { j11 };
+    let qidx: uint<11> = if quad == 1 || quad == 3 { 1024u11 -. j11 } else { j11 };
     reg(clk) sin_mag = inst sin_rom(clk, qidx);
-    reg(clk) sin_neg = quad.as_bits()[1];
+    reg(clk) sin_neg = quad >= 2;
     let mag18: int<18> = zext(sin_mag).as_int();
     let sin_val: int<18> = if sin_neg { 0 -. mag18 } else { mag18 };
     // Sel cycle: second stage.
