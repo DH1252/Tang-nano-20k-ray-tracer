@@ -59,6 +59,22 @@ module tb;
         end
     endtask
 
+    // Read debug word i (0x16 low, 0x17 high), leaving time for each reply
+    // (like a host that waits for it) before the next command.
+    task dbg_read(input [7:0] i);
+        reg [8*16-1:0] cmd;
+        begin
+            cmd = {"W 15 00", hex(i[7:4]), hex(i[3:0]), "\r"};
+            send(cmd);
+            send("R 16\r"); #(BIT * 10 * 10);
+            send("R 17\r"); #(BIT * 10 * 10);
+        end
+    endtask
+
+    function [7:0] hex(input [3:0] n);
+        hex = n < 10 ? "0" + n : "A" + n - 10;
+    endfunction
+
     // Print what the DUT sends back.
     integer k;
     reg [7:0] rx_ch;
@@ -100,6 +116,17 @@ module tb;
         send("W 01 0004\r");          // freeze after the first frame, no motion
         send("R 00\r");
         wait_frames(4);               // first frame (~23 ms to render) shown
+        // Debug readback of the first frame's camera and boxes (sim/check.py
+        // compares the 16=/17= replies with the model): d0, dv, s, sphere box 0.
+        dbg_read(8'h03);
+        dbg_read(8'h04);
+        dbg_read(8'h05);
+        dbg_read(8'h09);
+        dbg_read(8'h0A);
+        dbg_read(8'h0B);
+        dbg_read(8'h18);
+        dbg_read(8'h20);
+        dbg_read(8'h21);
         send("W 02 3000\r");          // yaw
         send("W 03 0400\r");          // pitch
         send("W 0A 7000\r");          // sun azimuth

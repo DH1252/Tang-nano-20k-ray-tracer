@@ -14,6 +14,8 @@ Examples
   rtctl.py COM5 get yaw pitch cycles
   rtctl.py COM5 keys                   # interactive: keys go straight to the board
   rtctl.py COM5 raw "W 02 4000"        # raw protocol line
+  rtctl.py COM5 debug                  # compare the hardware's camera and boxes
+                                       # with model/hw.py (stops the motion)
 
 On Windows run it as `py tools\rtctl.py ...` from a Command Prompt or
 PowerShell window. Requires pyserial (pip install pyserial). See
@@ -285,7 +287,73 @@ __doc_keys__ = """keys: a/d yaw  w/s pitch  z/x distance  j/l sun azimuth  i/k s
       b reflection bounces  r floor reflectivity  f freeze  t test pattern  c defaults
       q or Esc quits"""
 
-COMMANDS = {"dump": cmd_dump, "get": cmd_get, "set": cmd_set, "raw": cmd_raw, "keys": cmd_keys}
+def s16(v):
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def debug_words(b, idxs):
+    out = {}
+    for i in idxs:
+        b.write(0x15, i)
+        lo = b.read(0x16)
+        out[i] = (b.read(0x17) << 16) | lo
+    return out
+
+
+def expected_debug(regs):
+    """Model values of the debug words for the given register values."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "model"))
+    import hw
+    p = dict(yaw=regs[0x02], pitch=regs[0x03], dist=regs[0x04], tx=s16(regs[0x05]), ty=s16(regs[0x06]),
+             tz=s16(regs[0x07]), fov=regs[0x08], light_az=regs[0x0A], light_el=regs[0x0B])
+    sc = regs[0x12]
+    scene = dict(anim=regs[0x10], nsph=min(6, (sc >> 4) & 7), depth=sc & 3, floor_kr=(sc >> 2) & 3)
+    quality = bool(regs[0x01] & 0x20)
+    cam = hw.camera(p)
+    want = {}
+    names = {}
+    for base, key in ((0, "eye"), (3, "d0"), (6, "du"), (9, "dv"), (12, "light"), (15, "fwd"), (18, "right"),
+                      (21, "up")):
+        for j in range(3):
+            want[base + j] = cam[key][j] & 0xFFFFFFFF
+            names[base + j] = f"{key}[{'xyz'[j]}]"
+    want[24], names[24] = cam["s"] & 0xFFFFFFFF, "s"
+    sb, hb = hw.boxes(p, scene, quality)
+    for base, bx, label in ((32, sb, "sphere box"), (48, hb, "shadow box")):
+        for k, box in enumerate(bx):
+            if box is None:
+                want[base + 2 * k], want[base + 2 * k + 1] = 0, None   # off: x word 0, y word unused
+            else:
+                x0, x1, y0, y1 = box
+                want[base + 2 * k] = 0x80000000 | (x0 << 16) | x1
+                want[base + 2 * k + 1] = (y0 << 16) | y1
+            names[base + 2 * k] = f"{label} {k} on/x0/x1"
+            names[base + 2 * k + 1] = f"{label} {k} y0/y1"
+    return want, names
+
+
+def cmd_debug(b, _args):
+    ctrl = b.read(0x01)
+    if ctrl & 0x13:
+        b.write(0x01, ctrl & ~0x13)   # orbit, sun and sphere motion off: the camera stays put
+        print("motion stopped (orbit, sun, spheres) so the frame matches the registers")
+        time.sleep(0.5)
+    regs = {a: b.read(a) for a in (0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x10, 0x12)}
+    want, names = expected_debug(regs)
+    got = debug_words(b, sorted(want))
+    bad = 0
+    for i in sorted(want):
+        w = want[i]
+        if w is None:
+            continue
+        g = got[i]
+        ok = g == w
+        bad += not ok
+        print(f"{i:2d} {names[i]:24s} board 0x{g:08x}  model 0x{w:08x}  {'ok' if ok else 'MISMATCH'}")
+    print("all match" if bad == 0 else f"{bad} mismatches")
+
+
+COMMANDS = {"dump": cmd_dump, "get": cmd_get, "set": cmd_set, "raw": cmd_raw, "keys": cmd_keys, "debug": cmd_debug}
 
 
 def main(argv):

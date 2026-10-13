@@ -73,6 +73,9 @@ pub struct RenderOut {
     buf_odd: Option<(uint<9>, uint<16>)>,
     // A slot holds a finished line: (slot, y).
     line_done: Option<(uint<1>, uint<9>)>,
+    // The projector's sphere and shadow boxes, for the debug readback.
+    sph: [Box; 6],
+    shd: [Box; 6],
     // Clock cycles the last frame took.
     cycles: uint<24>,
 }
@@ -579,6 +582,8 @@ pub entity tracer(
         buf_even: buf_even,
         buf_odd: buf_odd,
         line_done: line_done,
+        sph: pj.sph,
+        shd: pj.shd,
         cycles: cycles,
     )
 }

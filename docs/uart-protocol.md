@@ -77,6 +77,17 @@ All registers are 16 bits wide. Angles are fractions of a turn: `0x4000` is
 | 12   | scene         | bits 1:0 bounces, 3:2 floor reflectivity (quarters), 6:4 spheres | `0x0061` | 1 bounce, matt floor, 6 spheres; more than 6 counts as 6 |
 | 13   | cycles        | clock cycles per frame / 256   |          | read only: the last finished frame (75 MHz: 0x129e ≈ 16.3 ms ≈ 61 fps for the default 640×480 view) |
 | 14   | core_clock    | core clock in units of 10 kHz  |          | read only: 0x1d4c = 75.00 MHz; set at build time (`CORE_MHZ`) |
+| 15   | debug_sel     | debug word index               | `0`      | selects the word read at 0x16/0x17 |
+| 16   | debug_lo      | debug word, bits 15:0          |          | read only |
+| 17   | debug_hi      | debug word, bits 31:16         |          | read only |
+
+Debug words (32-bit, signed values sign-extended), as the hardware computed
+them for the last frame: 0–2 `eye`, 3–5 `d0`, 6–8 `dU`, 9–11 `dV`, 12–14
+`L`, 15–17 `fwd`, 18–20 `right`, 21–23 `up`, 24 `s` (see `camera.spade`);
+32 + 2k and 33 + 2k sphere k's screen box (`on` in bit 31, `x0` in 25:16,
+`x1` in 9:0; then `y0` in 24:16, `y1` in 8:0), 48 + 2k and 49 + 2k its
+shadow box. `tools/rtctl.py PORT debug` reads them all and compares them
+with `model/hw.py`.
 
 The camera orbits `target` at distance `dist`: yaw 0 looks along −z. The sun
 is a directional light. Auto-motion adds the speed registers once per

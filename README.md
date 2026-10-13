@@ -177,6 +177,7 @@ tools/rtctl.py /dev/ttyUSB1 dump
 tools/rtctl.py /dev/ttyUSB1 set yaw 45 dist 4.5 fov 70 sun_el 20 orbit off
 tools/rtctl.py /dev/ttyUSB1 get cycles          # frame time and fps
 tools/rtctl.py /dev/ttyUSB1 keys                # single keys, q or Esc quits
+tools/rtctl.py /dev/ttyUSB1 debug               # camera and boxes vs. the model
 ```
 
 Windows (Command Prompt or PowerShell, Python from python.org):

@@ -9,6 +9,7 @@ Exits non-zero on any mismatch.
 """
 import glob
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "model"))
@@ -54,6 +55,27 @@ def main():
         if needle not in log:
             print(f"FAIL: '{needle}' not in sim.log")
             ok = False
+    # Debug readback of the first frame (tb_top.v): words 3-5 (d0), 9-11 (dv),
+    # 24 (s), 32-33 (sphere box 0), as 16= (low) / 17= (high) reply pairs.
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    import rtctl
+    p1, s1 = CASES[0][1], CASES[0][2]
+    regs = {0x01: 0x0004, 0x02: p1["yaw"], 0x03: p1["pitch"], 0x04: p1["dist"], 0x05: p1["tx"] & 0xFFFF,
+            0x06: p1["ty"] & 0xFFFF, 0x07: p1["tz"] & 0xFFFF, 0x08: p1["fov"], 0x0A: p1["light_az"],
+            0x0B: p1["light_el"], 0x10: s1["anim"], 0x12: 0x0061}
+    want, names = rtctl.expected_debug(regs)
+    lo = [int(v, 16) for v in re.findall(r"uart: 16=([0-9a-f]{4})", log)]
+    hi = [int(v, 16) for v in re.findall(r"uart: 17=([0-9a-f]{4})", log)]
+    words = [3, 4, 5, 9, 10, 11, 24, 32, 33]
+    if len(lo) < len(words) or len(hi) < len(words):
+        print(f"FAIL: debug readback: {len(lo)} of {len(words)} replies")
+        ok = False
+    else:
+        for i, l, h in zip(words, lo, hi):
+            if (h << 16 | l) != want[i]:
+                print(f"FAIL: debug word {i} ({names[i]}): 0x{h << 16 | l:08x}, model 0x{want[i]:08x}")
+                ok = False
+        print(f"ok: debug readback, {len(words)} words match the model")
     frames = sorted(glob.glob(os.path.join(out_dir, "frame_*.ppm")))
     pos = 0
     for n, (desc, params, scene, quality, tp) in enumerate(CASES, 1):

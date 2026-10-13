@@ -33,6 +33,8 @@ pub struct ControlOut {
     tx: Option<uint<8>>,
     // Pulses on every received byte, for an activity LED.
     rx_activity: bool,
+    // Debug readback: the word selected here is read at 0x16 (low) / 0x17 (high).
+    dbg_sel: uint<8>,
 }
 
 // Defaults, also used by the `c` key.
@@ -92,7 +94,8 @@ fn is_eol(c: uint<8>) -> bool { c == 0x0d || c == 0x0a }
 fn nudge(old: uint<16>, delta: int<16>) -> uint<16> { old +. delta.as_uint() }
 
 // Read-only registers live at 0x00 (ID), 0x0E (frame counter), 0x0F (status),
-// 0x13 (cycles per frame / 256) and 0x14 (core clock, 10 kHz units).
+// 0x13 (cycles per frame / 256), 0x14 (core clock, 10 kHz units) and
+// 0x16/0x17 (the debug word selected by 0x15, low and high half).
 fn reg_write(addr: uint<8>, w: Option<Write>) -> Option<uint<16>> {
     match w {
         Some(w) => if w.addr == addr { Some(w.value) } else { None },
@@ -114,9 +117,10 @@ pub entity control(
     status: uint<16>,
     cycles: uint<16>,
     core_cmhz: uint<16>,
+    dbg_word: uint<32>,
 ) -> ControlOut {
     decl parse, acc_a, acc_v;
-    decl ctrl, yaw, pitch, dist, tx, ty, tz, fov, yaw_speed, light_az, light_el, light_speed, rd_lat;
+    decl ctrl, yaw, pitch, dist, tx, ty, tz, fov, yaw_speed, light_az, light_el, light_speed, rd_lat, dbg_sel;
     decl anim, anim_speed, scene;
 
     // ---------------------------------------------------------------- parser
@@ -237,6 +241,7 @@ pub entity control(
         if defaults { d_light_el() } else { reg_write(0x0B, w).unwrap_or(light_el) };
     reg(clk) light_speed: uint<16> reset(rst: d_light_speed()) =
         if defaults { d_light_speed() } else { reg_write(0x0C, w).unwrap_or(light_speed) };
+    reg(clk) dbg_sel: uint<16> reset(rst: 0) = reg_write(0x15, w).unwrap_or(dbg_sel);
     reg(clk) rd_lat: uint<16> reset(rst: d_rd_lat()) =
         if defaults { d_rd_lat() } else { reg_write(0x0D, w).unwrap_or(rd_lat) };
     reg(clk) anim: uint<16> reset(rst: 0) =
@@ -273,6 +278,9 @@ pub entity control(
         0x12 => scene,
         0x13 => cycles,
         0x14 => core_cmhz,
+        0x15 => dbg_sel,
+        0x16 => trunc(dbg_word),
+        0x17 => trunc(dbg_word >> 16),
         _ => 0,
     };
 
@@ -334,5 +342,6 @@ pub entity control(
         params: params,
         tx: if send_now { Some(msg[0]) } else { None },
         rx_activity: rx.is_some(),
+        dbg_sel: trunc(dbg_sel),
     )
 }

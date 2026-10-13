@@ -27,6 +27,42 @@ mod harness;
 
 use lib::sdram::Request;
 
+fn w18(v: int<18>) -> uint<32> { let x: int<32> = sext(v); x.as_uint() }
+fn w28(v: int<28>) -> uint<32> { let x: int<32> = sext(v); x.as_uint() }
+// {on, x0, x1} and {y0, y1} of a box
+fn box_x(b: lib::projector::Box) -> uint<32> {
+    let on: uint<32> = if b.on { 0x80000000 } else { 0 };
+    let x0: uint<32> = zext(b.x0);
+    let x1: uint<32> = zext(b.x1);
+    on | (x0 << 16) | x1
+}
+fn box_y(b: lib::projector::Box) -> uint<32> {
+    let y0: uint<32> = zext(b.y0);
+    let y1: uint<32> = zext(b.y1);
+    (y0 << 16) | y1
+}
+
+// Word i: 0-2 eye, 3-5 d0, 6-8 du, 9-11 dv, 12-14 light, 15-17 fwd,
+// 18-20 right, 21-23 up, 24 s; 32 + 2k / 33 + 2k sphere box k (x, y);
+// 48 + 2k / 49 + 2k shadow box k.
+fn debug_word(i: uint<8>, c: lib::camera::CamOut, sph: [lib::projector::Box; 6], shd: [lib::projector::Box; 6]) -> uint<32> {
+    let k: uint<3> = trunc((i >> 1) & 7);
+    let kk: uint<3> = if k > 5 { 0 } else { k };
+    let odd = (i & 1) == 1;
+    if i < 3 { let j: uint<2> = trunc(i); w18(c.eye[j]) }
+    else if i < 6 { let j: uint<2> = trunc(i - 3); w28(c.d0[j]) }
+    else if i < 9 { let j: uint<2> = trunc(i - 6); w28(c.du[j]) }
+    else if i < 12 { let j: uint<2> = trunc(i - 9); w28(c.dv[j]) }
+    else if i < 15 { let j: uint<2> = trunc(i - 12); w18(c.light[j]) }
+    else if i < 18 { let j: uint<2> = trunc(i - 15); w18(c.fwd[j]) }
+    else if i < 21 { let j: uint<2> = trunc(i - 18); w18(c.right[j]) }
+    else if i < 24 { let j: uint<2> = trunc(i - 21); w18(c.up[j]) }
+    else if i == 24 { w28(c.s) }
+    else if i >= 32 && i < 44 { if odd { box_y(sph[kk]) } else { box_x(sph[kk]) } }
+    else if i >= 48 && i < 60 { if odd { box_y(shd[kk]) } else { box_x(shd[kk]) } }
+    else { 0 }
+}
+
 #[no_mangle(all)]
 // rtl/gowin/clocks.v; the core clock and the constants that follow it are set
 // by scripts/clock_config.py.
@@ -120,8 +156,9 @@ entity top(
     let press_s1 = inst button(clk_core, rst, btn_s1);
     let press_s2 = inst button(clk_core, rst, btn_s2);
     let (cycles, cycles_inv) = port();
+    let (dbg_word, dbg_word_inv) = port();
     let ctl = inst control::control(clk_core, rst, rx_byte, tx_ready, frame_tick, press_s1, press_s2, frames, status, cycles,
-                                    core_cmhz);
+                                    core_cmhz, dbg_word);
     let utx = inst uart::uart_tx(clk_core, rst, ctl.tx, uart_div);
     set tx_ready_inv = utx.ready;
     set uart_tx = utx.tx;
@@ -222,6 +259,12 @@ entity top(
     set render_quality_inv = r.quality;
     set render_phase_inv = r.phase;
     set cycles_inv = trunc(r.cycles >> 8);
+
+    // Debug readback (UART 0x15 selects, 0x16/0x17 read): the camera vectors
+    // and the projector's boxes as the hardware computed them. tools/rtctl.py
+    // `debug` compares them with the model.
+    reg(clk_core) dbg_r: uint<32> reset(rst: 0) = debug_word(ctl.dbg_sel, cam.out, r.sph, r.shd);
+    set dbg_word_inv = dbg_r;
 
     reg(clk_core) frame_count: uint<16> reset(rst: 0) = if r.frame_begin { frame_count +. 1 } else { frame_count };
     set frames_inv = frame_count;
